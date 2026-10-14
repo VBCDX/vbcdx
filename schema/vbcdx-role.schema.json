@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vbcdx-role.schema.json",
+  "title": "VBCDX role descriptor (role.json)",
+  "description": "One per role, at <roles_dir>/<id>/role.json in an agent pack (vbcdx-pack.schema.json), next to the role's prompt.md. Every renderer reads the role from this descriptor and that prompt, so a role means the same thing in every harness. It states the role's policy and local capabilities in abstract terms; the installer maps them to each harness's native controls. Every per-field rule is in this schema. Two rules span fields or files and are checked only by the reference loader (src/packs/load.js): id equals the role's directory name, and credential_suffix is the id upper-cased with hyphens as underscores.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "credential_suffix",
+    "name",
+    "description",
+    "policy",
+    "local_capabilities",
+    "web_search",
+    "remote_capabilities",
+    "opencode_mode"
+  ],
+  "properties": {
+    "schema_version": {
+      "description": "Descriptor format version.",
+      "const": 1
+    },
+    "id": {
+      "description": "The role id: its directory name, lowercase letters and digits in hyphen-separated words.",
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "credential_suffix": {
+      "description": "The id upper-cased with hyphens as underscores; names the role's credential keys (VBCDX_AGENTS_TOKEN_<SUFFIX>).",
+      "type": "string",
+      "pattern": "^[A-Z0-9]+(_[A-Z0-9]+)*$"
+    },
+    "name": {
+      "description": "Display name.",
+      "$ref": "#/$defs/line",
+      "maxLength": 80
+    },
+    "description": {
+      "description": "One line saying what the role does; written into harness definitions and A2A cards.",
+      "$ref": "#/$defs/line",
+      "maxLength": 1000
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "summary",
+        "source_read_only",
+        "may_merge",
+        "enforcement"
+      ],
+      "properties": {
+        "kind": {
+          "description": "A short policy class, for example implementer or inspector; also an A2A skill tag.",
+          "type": "string",
+          "pattern": "^[a-z][a-z-]{0,31}$"
+        },
+        "summary": {
+          "$ref": "#/$defs/line",
+          "maxLength": 400
+        },
+        "source_read_only": {
+          "type": "boolean"
+        },
+        "may_merge": {
+          "type": "boolean"
+        },
+        "enforcement": {
+          "description": "Which of the stances above a harness or credential actually enforces.",
+          "$ref": "#/$defs/line",
+          "maxLength": 600
+        }
+      }
+    },
+    "local_capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "filesystem",
+        "shell",
+        "web",
+        "delegation"
+      ],
+      "properties": {
+        "filesystem": {
+          "enum": [
+            "read-only",
+            "read-write"
+          ]
+        },
+        "shell": {
+          "type": "boolean"
+        },
+        "web": {
+          "type": "boolean"
+        },
+        "delegation": {
+          "type": "boolean"
+        }
+      }
+    },
+    "web_search": {
+      "description": "True when the role gets a web search tool where the harness supports one.",
+      "type": "boolean"
+    },
+    "remote_capabilities": {
+      "description": "Per tool contract (for example vbcdx.forgejo/1), the tools the role may call once a service of that contract is bound. A key may instead name a service, as packs did before contracts; a contract key must be listed in the pack's contracts. Values are tool names.",
+      "type": "object",
+      "propertyNames": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/contract"
+          },
+          {
+            "$ref": "#/$defs/service"
+          }
+        ]
+      },
+      "additionalProperties": {
+        "type": "array",
+        "uniqueItems": true,
+        "maxItems": 512,
+        "items": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        }
+      }
+    },
+    "dependencies": {
+      "description": "Optional. Per service, the tool contract the role's remote capabilities are written against, for example vbcdx.forgejo/1.",
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/service"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9.-]{0,62}/[1-9][0-9]{0,3}$"
+      }
+    },
+    "external_dependencies": {
+      "description": "Optional and informational: things outside any bound tool that the role's work relies on, and whether they are available. Renderers do not read it.",
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "status",
+          "note"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+            "maxLength": 64
+          },
+          "status": {
+            "enum": [
+              "available",
+              "unavailable"
+            ]
+          },
+          "note": {
+            "$ref": "#/$defs/line",
+            "maxLength": 400
+          }
+        }
+      }
+    },
+    "opencode_mode": {
+      "description": "OpenCode agent mode.",
+      "enum": [
+        "primary",
+        "subagent",
+        "all"
+      ]
+    }
+  },
+  "$defs": {
+    "line": {
+      "description": "One non-empty line of printable text.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$"
+    },
+    "service": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,62}[a-z0-9]$"
+    },
+    "contract": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9.-]{0,62}/[1-9][0-9]{0,3}$"
+    }
+  }
+}

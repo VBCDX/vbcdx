@@ -1,0 +1,67 @@
+{
+  "name": "@vbcdx/vbcdx",
+  "version": "0.1.1",
+  "description": "One installer for agent packs, skills and MCP tool packages: vbcdx install agent|skill|tool --harness=<claude|codex|opencode|hermes>. Renders the roles of installed agent packs (vbcdx-pack.json) and registers installed tool packages from their vbcdx.json declaration.",
+  "type": "module",
+  "bin": {
+    "vbcdx": "bin/vbcdx.js",
+    "vbcdx-dev-agents": "bin/vbcdx-dev-agents.js"
+  },
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./tool-declaration": "./src/install/tool-declaration.js",
+    "./pack": "./src/packs/load.js",
+    "./overlay": "./src/overlays/overlay.js",
+    "./schema/vbcdx-tool.schema.json": "./schema/vbcdx-tool.schema.json",
+    "./schema/vbcdx-pack.schema.json": "./schema/vbcdx-pack.schema.json",
+    "./schema/vbcdx-role.schema.json": "./schema/vbcdx-role.schema.json",
+    "./schema/vbcdx-overlay.schema.json": "./schema/vbcdx-overlay.schema.json",
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "bin",
+    "src",
+    "assets",
+    "schema",
+    ".env.example",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "start": "node bin/a2a-server.js",
+    "lint": "node scripts/lint.mjs"
+  },
+  "keywords": [
+    "vbcdx",
+    "agents",
+    "agent-pack",
+    "claude-code",
+    "codex",
+    "opencode",
+    "installer",
+    "hermes",
+    "mcp"
+  ],
+  "author": "VBCDX",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "smol-toml": "^1.9.1",
+    "yaml": "^2.9.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/VBCDX/vbcdx.git"
+  },
+  "homepage": "https://github.com/VBCDX/vbcdx#readme",
+  "bugs": {
+    "url": "https://github.com/VBCDX/vbcdx/issues"
+  }
+}

@@ -1,0 +1,12 @@
+#!/usr/bin/env node
+// Test fixture: a tool package bin whose `manifest` prints a tool manifest.
+const tools = [
+  { name: "get_issue", description: "d", inputSchema: {}, outputSchema: {}, effect: "read", required_permissions: [] },
+  { name: "whoami", description: "d", inputSchema: {}, outputSchema: {}, effect: "read", required_permissions: [] },
+];
+if (process.argv[2] === "manifest") {
+  process.stdout.write(JSON.stringify({ schema_version: 1, service: "example-tracker", contract: "example.tracker/1", package_version: "1.2.3", tools }) + "\n");
+} else {
+  process.stderr.write("fixture: only `manifest` is implemented\n");
+  process.exitCode = 1;
+}

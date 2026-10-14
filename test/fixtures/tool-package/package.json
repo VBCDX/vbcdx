@@ -1,0 +1,6 @@
+{
+  "name": "@example/tracker-plugin",
+  "version": "1.2.3",
+  "type": "module",
+  "bin": { "example-tracker": "bin/example-tracker" }
+}

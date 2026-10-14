@@ -1,0 +1,6 @@
+{
+  "name": "@example/agent-pack",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Test fixture agent pack."
+}

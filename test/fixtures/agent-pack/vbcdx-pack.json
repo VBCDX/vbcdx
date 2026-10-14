@@ -1,0 +1,22 @@
+{
+  "$schema": "../../../schema/vbcdx-pack.schema.json",
+  "schema_version": 1,
+  "name": "example-agents",
+  "description": "Test fixture: a small agent pack.",
+  "roles_dir": "assets/roles",
+  "roles": [
+    "adversarial-auditor",
+    "all-in-one-dev-agent",
+    "code-agent",
+    "devops-agent",
+    "pm-agent",
+    "qa-agent",
+    "review-agent",
+    "security-agent"
+  ],
+  "skills_dir": "skills",
+  "contracts": [
+    "vbcdx.coolify/1",
+    "vbcdx.forgejo/1"
+  ]
+}

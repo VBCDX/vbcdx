@@ -1,0 +1,184 @@
+platform_toolsets:
+  cli:
+  - file
+  - todo
+  telegram:
+  - file
+agent:
+  disabled_toolsets:
+  - browser
+  reasoning_effort: high
+  coding_context: 'off'
+  max_turns: 60
+  temperature: 1.0
+  top_p: 0.95
+model:
+  provider: custom:litellm
+  base_url: https://llm.example/v1
+  default: old-model
+display:
+  memory_notifications: 'on'
+  tool_progress: 'off'
+  bell: true
+  theme: y
+  compact: n
+operator:
+  strings:
+  - 'on'
+  - 'off'
+  - 'yes'
+  - 'no'
+  - y
+  - n
+  - Y
+  - N
+  - 'true'
+  - 'True'
+  - 'FALSE'
+  - 'null'
+  - '~'
+  - ''
+  - '0755'
+  - '0x1F'
+  - '0b101'
+  - 0o17
+  - '1:20'
+  - '190:20:30'
+  - 08:30
+  - '22:00'
+  - 09
+  - 08540
+  - '1_000'
+  - 1e3
+  - 1e-5
+  - 1.5e3
+  - '1.5e+3'
+  - '.5'
+  - '1.10'
+  - 5m
+  - '.inf'
+  - '.nan'
+  - '2026-09-25'
+  - '2026-09-25 10:00:00'
+  - '='
+  - '<<'
+  - '-'
+  - '123'
+  - '1.0'
+  - '+1'
+  - '012'
+  - 08
+  - '#x'
+  - '- x'
+  - 'a: b'
+  - 'a #b'
+  - ' lead'
+  - 'trail '
+  - 'multi
+
+    line'
+  - " \n"
+  - "tab\there"
+  - "\x7F"
+  - "\x01"
+  - '''q'''
+  - '"dq"'
+  - é
+  - 😀
+  - \
+  - '@x'
+  - '%x'
+  - '!x'
+  - '&x'
+  - '*x'
+  - '[a]'
+  - '{a}'
+  - a,b
+  - '?'
+  keys:
+    'on': 0
+    'off': 1
+    'yes': 2
+    'no': 3
+    y: 4
+    n: 5
+    Y: 6
+    N: 7
+    'true': 8
+    'True': 9
+    'FALSE': 10
+    'null': 11
+    '~': 12
+    ? ''
+    : 13
+    '0755': 14
+    '0x1F': 15
+    '0b101': 16
+    0o17: 17
+    '1:20': 18
+    '190:20:30': 19
+    08:30: 20
+    '22:00': 21
+    09: 22
+    08540: 23
+    '1_000': 24
+    1e3: 25
+    1e-5: 26
+    1.5e3: 27
+    '1.5e+3': 28
+    '.5': 29
+    '1.10': 30
+    5m: 31
+    '.inf': 32
+    '.nan': 33
+    '2026-09-25': 34
+    '2026-09-25 10:00:00': 35
+    '=': 36
+    '<<': 37
+    '-': 38
+    '123': 39
+    '1.0': 40
+    '+1': 41
+    '012': 42
+    08: 43
+    '#x': 44
+    '- x': 45
+    'a: b': 46
+    'a #b': 47
+    ' lead': 48
+    'trail ': 49
+    "tab\there": 52
+    "\x7F": 53
+    "\x01": 54
+    '''q''': 55
+    '"dq"': 56
+    é: 57
+    😀: 58
+    \: 59
+    '@x': 60
+    '%x': 61
+    '!x': 62
+    '&x': 63
+    '*x': 64
+    '[a]': 65
+    '{a}': 66
+    a,b: 67
+    '?': 68
+  typed:
+  - true
+  - false
+  - null
+  - 0
+  - 7
+  - -3
+  - 100000000000000000000
+  - 0.5
+  - 1.0
+  - -2.0
+  - 1.0e+21
+  - 1.5e-07
+  - .inf
+  - -.inf
+  - .nan
+  - 2026-09-25
+  - 2026-09-25 10:00:00

@@ -1,0 +1,53 @@
+# Continuous integration and release publishing.
+#
+# - test: lint and the full suite on every push and pull request, Node 22 and 24.
+# - publish: only when a GitHub release is published, and only from this repository.
+#   It publishes to npm with provenance (https://docs.npmjs.com/generating-provenance-statements),
+#   which needs the public `repository` field in package.json and the id-token permission.
+#   The NPM_TOKEN secret is set by the maintainers; nothing here publishes without it.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+
+  publish:
+    if: github.event_name == 'release' && github.repository == 'VBCDX/vbcdx'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - run: npm ci
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -1,0 +1,202 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vbcdx-tool.schema.json",
+  "title": "VBCDX tool declaration (vbcdx.json)",
+  "description": "Shipped at the root of an MCP tool package. Tells `vbcdx install tool` how to register the package's MCP server with a harness. It names things (the bin, its subcommands, the environment variables it reads) and is built so it cannot hold a host, a key or a token: arguments are lowercase words and --flags with no digits, and descriptions refuse URLs, host names, IP addresses and key-like runs. A description is free text, so a secret made only of ordinary words cannot be ruled out. Every per-field rule is in this schema. Six rules span fields and are checked only by the reference validator (src/install/tool-declaration.js, exported as validateToolDeclaration): http.port_env must be listed in env, and its modes (if given) include http; a variable whose modes list http needs an http mode; env names are unique, stdio.bin is a key of the package.json bin map, and in each args list no subcommand follows a --flag. Validate with validateToolDeclaration, not with this schema alone.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "server_name",
+    "stdio",
+    "env",
+    "manifest"
+  ],
+  "properties": {
+    "$schema": {
+      "description": "Optional pointer to this schema, for editors: a relative path ending in vbcdx-tool.schema.json. No URL, so it can never carry a host or credentials.",
+      "type": "string",
+      "maxLength": 200,
+      "pattern": "^([A-Za-z0-9@._-]{1,28}/){0,8}vbcdx-tool\\.schema\\.json$"
+    },
+    "schema_version": {
+      "description": "Declaration format version.",
+      "const": 1
+    },
+    "server_name": {
+      "description": "The MCP server name registered with the harness. Agents see its tools as mcp__<server_name>__<tool>, so it uses lowercase letters, digits and hyphens only.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,62}[a-z0-9]$"
+    },
+    "contract": {
+      "description": "Optional interface contract the tool manifest declares, for example vbcdx.forgejo/1.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9.-]{0,62}/[1-9][0-9]{0,3}$"
+    },
+    "stdio": {
+      "description": "How the harness starts the server over stdio: the package bin and its arguments. The bin must be a key of the package's package.json bin map.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bin",
+        "args"
+      ],
+      "properties": {
+        "bin": {
+          "$ref": "#/$defs/binName"
+        },
+        "args": {
+          "$ref": "#/$defs/args"
+        }
+      }
+    },
+    "http": {
+      "description": "Optional network (Streamable HTTP) mode. The port is user config, named by port_env; no host or port value is declared.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "args",
+        "path",
+        "port_env"
+      ],
+      "properties": {
+        "args": {
+          "$ref": "#/$defs/args"
+        },
+        "path": {
+          "description": "URL path of the MCP endpoint, for example /mcp. No '.' or '..' segment.",
+          "type": "string",
+          "pattern": "^/[A-Za-z0-9._~-]+(/[A-Za-z0-9._~-]+)*$",
+          "maxLength": 128,
+          "not": {
+            "pattern": "(^|/)\\.{1,2}(/|$)"
+          }
+        },
+        "port_env": {
+          "description": "Name of the environment variable that sets the listen port. It must also be listed in env.",
+          "$ref": "#/$defs/envName"
+        }
+      }
+    },
+    "env": {
+      "description": "Every environment variable the server reads, by name only, with a one-line description. Names are unique.",
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "description",
+          "kind",
+          "required"
+        ],
+        "properties": {
+          "name": {
+            "$ref": "#/$defs/envName"
+          },
+          "description": {
+            "description": "One line of printable text saying what the variable is for (no control characters, no line or paragraph separators, no invisible formatting characters such as bidi controls, zero-width characters or the soft hyphen). Never a value: no URL (://), no host name or IP address, no run of 20+ key characters (letters, digits, + / = -) and no run of 32+ including underscores. Plain words cannot be ruled out.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029\\u00ad\\u0600-\\u0605\\u061c\\u06dd\\u070f\\u0890\\u0891\\u08e2\\u180e\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u206f\\ufeff\\ufff9-\\ufffb\\udb40]+$",
+            "not": {
+              "anyOf": [
+                {
+                  "pattern": "^\\s*$"
+                },
+                {
+                  "pattern": "://"
+                },
+                {
+                  "pattern": "[A-Za-z0-9-]+\\.[A-Za-z]{2,}"
+                },
+                {
+                  "pattern": "\\d{1,3}(\\.\\d{1,3}){3}"
+                },
+                {
+                  "pattern": "[A-Za-z0-9+/=-]{20,}"
+                },
+                {
+                  "pattern": "[A-Za-z0-9_+/=-]{32,}"
+                }
+              ]
+            }
+          },
+          "kind": {
+            "description": "credential: a secret the user supplies (written only as a ${VAR} reference); config: a non-secret setting.",
+            "enum": [
+              "credential",
+              "config"
+            ]
+          },
+          "required": {
+            "description": "True when the server cannot make a call without it.",
+            "type": "boolean"
+          },
+          "modes": {
+            "description": "Optional. The run modes that read the variable: stdio (the server a harness starts) and http (the network server). Both when absent. A harness's stdio entry only carries the variables whose modes include stdio.",
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 2,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "stdio",
+                "http"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "credential_file": {
+      "description": "Optional. Present when each tool call takes an absolute credential file path as an argument (the per-role identity); argument is that argument's name. vbcdx binds roles before the file exists, because some tools pass credentials through, so the tool itself must fail a call whose file is missing, unreadable or incomplete with an error that names the file and says what it must contain, never with a bare failure or by falling back to another identity. `vbcdx doctor` also reports a missing file.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "argument"
+      ],
+      "properties": {
+        "argument": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        }
+      }
+    },
+    "manifest": {
+      "description": "Arguments that make the stdio bin print its JSON tool manifest and exit, for example [\"manifest\"].",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "args"
+      ],
+      "properties": {
+        "args": {
+          "$ref": "#/$defs/args"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "binName": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "args": {
+      "description": "Subcommands first, then bare --flags: lowercase letters joined by single hyphens, at most 31 characters, no digits, dots, '=' or '/'. No subcommand may follow a flag (validator rule), so a flag can never be given a value. These shapes leave no room for a host, key or token; a plain lowercase word is the only free text an argument can hold.",
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "string",
+        "maxLength": 31,
+        "pattern": "^(--)?[a-z]+(-[a-z]+)*$"
+      }
+    },
+    "envName": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+    }
+  }
+}

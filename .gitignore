@@ -1,0 +1,13 @@
+node_modules/
+*.log
+.DS_Store
+*.tgz
+/tmp-*/
+coverage/
+__pycache__/
+# The default store `vbcdx fetch` writes: fetched trees, possibly of private repositories.
+vbcdx-store/
+
+# Agent packs placed in the A2A image build context (see packs/README.md).
+packs/*
+!packs/README.md
