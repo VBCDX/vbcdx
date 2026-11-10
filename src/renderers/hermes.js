@@ -21,11 +21,12 @@
 // MCP servers — the one deliberate exception to "the installer never writes
 // harness MCP configuration". Hermes loads MCP servers only from the profile's
 // config.yaml and enforces a per-server tool allow-list there (tools.include), so
-// for a role the integrations file BINDS, the profile gets an entry for the
-// companion's fixed stdio binary with tools.include = exactly the bound tools.
-// Unbound roles get none. The companion's own settings are not rendered: Hermes
-// gives stdio servers a filtered environment, so they are passed as ${VAR}
-// references that Hermes resolves from the profile's .env at load time.
+// for a role the integrations file BINDS, the profile gets an entry with
+// tools.include = exactly the bound tools. A stdio server starts the way it is
+// declared (the service's `stdio` launch, or its installed tool's vbcdx.json); no
+// contract has a launch built in. Unbound roles get none. The server's settings are
+// not rendered: Hermes gives stdio servers a filtered environment, so they are
+// passed as ${VAR} references that Hermes resolves from the profile's .env.
 //
 // Web search: a role whose descriptor declares web_search gets the web-litellm-search
 // plugin under plugins/, plugins.enabled naming it, web.search_backend/extract_backend
@@ -36,19 +37,12 @@
 import { readFileSync } from "node:fs";
 import { stringifyPy } from "../fs/pyyaml.js";
 import { hermesDisabledToolsets, boundServiceTools, credentialBindingNote, hermesPlatformToolsets } from "./native.js";
-import { FORGEJO_CONTRACT, COOLIFY_CONTRACT } from "../config/integrations.js";
+import { FORGEJO_CONTRACT } from "../config/integrations.js";
+import { configError } from "../errors.js";
 
 export const HERMES_PROVIDER_NAME = "vbcdx";
 export const HERMES_KEY_ENV = "HERMES_PROVIDER_API_KEY";
 
-// Companion stdio binaries of the bundled contracts and the settings each reads (their
-// READMEs): the fallback launch for an integrations-file stdio service when no tool of that
-// name and contract was installed with `vbcdx install tool`. An installed tool starts the
-// way its own vbcdx.json declares, with only its stdio-mode settings.
-export const HERMES_COMPANION = Object.freeze({
-  [FORGEJO_CONTRACT]: { command: "vbcdx-forgejo", env: ["VBCDX_FORGEJO_URL", "VBCDX_FORGEJO_WRITES"] },
-  [COOLIFY_CONTRACT]: { command: "vbcdx-coolify", env: ["VBCDX_COOLIFY_URL", "VBCDX_COOLIFY_WRITES"] },
-});
 
 // For a transport "http" service the profile connects to the service url and
 // presents its own identity in a header, resolved by Hermes from the profile's
@@ -92,19 +86,13 @@ export function renderHermesMcpServers(bindings) {
       servers[b.server] = { url: b.url, headers: { Authorization: "Bearer ${" + tokenEnv + "}" }, tools };
       continue;
     }
-    // A tool installed with `vbcdx install tool` carries its declared launch.
-    if (b.stdio) {
-      servers[b.server] = { command: b.stdio.command, args: [...b.stdio.args], env: { ...b.stdio.env }, tools };
-      continue;
+    // A stdio service starts the way it is declared: its integrations-file `stdio`
+    // launch, or the vbcdx.json of the tool installed with `vbcdx install tool`. The same
+    // for every contract: none has a launch built in.
+    if (!b.stdio) {
+      throw configError(`Service ${b.server} is a stdio service bound to a role, but nothing says how to start it: install its tool with \`vbcdx install tool\`, or give the service a "stdio" launch in the integrations file.`);
     }
-    const companion = HERMES_COMPANION[b.contract];
-    if (!companion) continue; // only services with a known companion binary
-    servers[b.server] = {
-      command: companion.command,
-      args: ["mcp"],
-      env: Object.fromEntries(companion.env.map((k) => [k, "${" + k + "}"])),
-      tools,
-    };
+    servers[b.server] = { command: b.stdio.command, args: [...b.stdio.args], env: { ...b.stdio.env }, tools };
   }
   return servers;
 }

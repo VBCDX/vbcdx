@@ -13,6 +13,7 @@
 import { isAbsolute } from "node:path";
 import { HARNESSES, isSafeId } from "../roles/registry.js";
 import { configError } from "../errors.js";
+import { shownOption, shownWord, unexpectedArgument } from "../shown.js";
 
 export const KINDS = Object.freeze(["agent", "skill", "tool"]);
 
@@ -20,7 +21,7 @@ function parseAgents(raw) {
   const out = [];
   for (const item of raw.split(",").map((s) => s.trim())) {
     if (item === "") throw configError("The agent list contains an empty item.");
-    if (!isSafeId(item)) throw configError(`Unknown agent ID: ${item}.`);
+    if (!isSafeId(item)) throw configError(`Unknown agent ID: ${shownWord(item)}.`);
     if (!out.includes(item)) out.push(item);
   }
   return out;
@@ -33,13 +34,15 @@ function parseAgents(raw) {
  */
 export function parseVbcdxArgs(argv) {
   const [command, ...rest] = argv;
-  if (!["install", "remove", "list", "doctor", "packs", "fetch", "sources"].includes(command)) throw configError(`Unknown command: ${command}.`);
+  if (!["install", "remove", "list", "doctor", "packs", "fetch", "sources"].includes(command)) throw configError(`Unknown command: ${shownWord(command)}.`);
   const positional = [];
+  const positionAt = []; // each positional's 1-based position after `vbcdx`, for errors
   const opts = { command, harness: null, scope: null, env: null, packs: [], overlays: [], force: false, dryRun: false, quiet: false, json: false,
     lock: null, sources: null, store: null };
-  for (const arg of rest) {
+  for (const [i, arg] of rest.entries()) {
     if (!arg.startsWith("--")) {
       positional.push(arg);
+      positionAt.push(i + 2);
       continue;
     }
     const eq = arg.indexOf("=");
@@ -66,7 +69,7 @@ export function parseVbcdxArgs(argv) {
       case "--dry-run": opts.dryRun = flag(); break;
       case "--quiet": opts.quiet = flag(); break;
       case "--json": opts.json = flag(); break;
-      default: throw configError(`Unknown or malformed option: ${arg}.`);
+      default: throw configError(`Unknown or malformed option: ${shownOption(arg)}.`);
     }
   }
 
@@ -74,7 +77,7 @@ export function parseVbcdxArgs(argv) {
     const [kind, name, ...extra] = positional;
     if (!KINDS.includes(kind)) throw configError(`${command} needs a kind: agent, skill or tool.`);
     if (!name) throw configError(`${command} ${kind} needs a name.`);
-    if (extra.length) throw configError(`Unexpected argument: ${extra[0]}.`);
+    if (extra.length) throw configError(unexpectedArgument(positionAt[2]));
     opts.kind = kind;
     if (kind === "agent") {
       opts.names = parseAgents(name);
@@ -113,7 +116,7 @@ export function parseVbcdxArgs(argv) {
   }
 
   if (!opts.harness) throw configError(`--harness is required (${HARNESSES.join("|")}).`);
-  if (!HARNESSES.includes(opts.harness)) throw configError(`Unsupported --harness: ${opts.harness}.`);
+  if (!HARNESSES.includes(opts.harness)) throw configError(`Unsupported --harness: ${shownWord(opts.harness)}.`);
   if (opts.env !== null && !isAbsolute(opts.env)) throw configError("--env must be an absolute path.");
 
   if (opts.harness === "hermes") {
@@ -121,7 +124,7 @@ export function parseVbcdxArgs(argv) {
     opts.scope = "user";
   } else {
     opts.scope = opts.scope || "user";
-    if (!["user", "project"].includes(opts.scope)) throw configError(`Unsupported --scope: ${opts.scope}. Use user or project.`);
+    if (!["user", "project"].includes(opts.scope)) throw configError(`Unsupported --scope: ${shownWord(opts.scope)}. Use user or project.`);
   }
   return opts;
 }

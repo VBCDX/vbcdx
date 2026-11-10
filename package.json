@@ -1,6 +1,6 @@
 {
   "name": "@vbcdx/vbcdx",
-  "version": "0.1.1",
+  "version": "0.2.12",
   "description": "One installer for agent packs, skills and MCP tool packages: vbcdx install agent|skill|tool --harness=<claude|codex|opencode|hermes>. Renders the roles of installed agent packs (vbcdx-pack.json) and registers installed tool packages from their vbcdx.json declaration.",
   "type": "module",
   "bin": {

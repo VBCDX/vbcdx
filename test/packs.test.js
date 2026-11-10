@@ -87,13 +87,19 @@ test("validatePackDeclaration: every per-field rule, each case changing the inpu
     ["too many roles", { ...DECL, roles: Array.from({ length: 257 }, (_, i) => `r${i}`) }, /more than 256/],
     ["contract without a major", { ...DECL, contracts: ["vbcdx.forgejo"] }, /contracts\[0\] is not a valid contract/],
     ["contract listed twice", { ...DECL, contracts: ["a.b/1", "a.b/1"] }, /a\.b\/1 is listed twice/],
+    ["contract_tags not an object", { ...DECL, contract_tags: ["code-host"] }, /contract_tags must be an object/],
+    ["a contract_tags key not a contract", { ...DECL, contract_tags: { forgejo: "code-host" } }, /contract_tags: "forgejo" is not a contract/],
+    ["a contract_tags key not in contracts", { ...DECL, contract_tags: { ...DECL.contract_tags, "acme.tracker/1": "issue-tracker" } }, /contract_tags: acme\.tracker\/1 is not listed in contracts/],
+    ["a contract_tags value off the closed list", { ...DECL, contract_tags: { "vbcdx.forgejo/1": "forgejo" } }, /contract_tags\.vbcdx\.forgejo\/1 must be one of code-host, deployment/],
+    ["a contract_tags value that names a host", { ...DECL, contract_tags: { "vbcdx.forgejo/1": "git.example.org" } }, /contract_tags\.vbcdx\.forgejo\/1 must be one of/],
+    ["too many contract_tags", { ...DECL, contract_tags: Object.fromEntries(Array.from({ length: 65 }, (_, i) => [`c${i}.x/1`, "ci"])) }, /contract_tags has more than 64/],
   ];
   for (const [label, decl, expected] of cases) {
     assert.notDeepEqual(decl, DECL, `${label}: the case changes the input`);
     assert.match(errorsOf(validatePackDeclaration, decl), expected, label);
   }
   // Optional fields may be absent.
-  const { description, skills_dir, contracts, $schema, ...minimal } = DECL;
+  const { description, skills_dir, contracts, contract_tags, $schema, ...minimal } = DECL;
   assert.deepEqual(validatePackDeclaration(minimal), { ok: true, errors: [] });
 });
 
@@ -171,7 +177,7 @@ test("readPack: cross-file rules, each naming the role or directory", () => {
     }, /role qa-agent: web_search must be true or false/],
     ["a role depends on a contract the pack does not list", (d) => {
       const p = join(d, PACK_DECLARATION_FILE);
-      writeJson(p, { ...readJson(p), contracts: ["vbcdx.forgejo/1"] });
+      writeJson(p, { ...readJson(p), contracts: ["vbcdx.forgejo/1"], contract_tags: { "vbcdx.forgejo/1": "code-host" } });
     }, /role \S+: dependencies\.coolify names vbcdx\.coolify\/1, which the pack does not list in contracts/],
     ["skills_dir missing", (d) => rmSync(join(d, "skills"), { recursive: true }), /skills_dir skills is not a directory/],
     ["roles_dir is a symlink out of the package", (d) => {

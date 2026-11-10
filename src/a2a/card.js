@@ -82,17 +82,14 @@ function cardDescription(descriptor) {
   return `${descriptor.description.trimEnd()} ${DISCOVERY_ONLY_NOTE}`;
 }
 
-// Remote-capability service keys are mapped to GENERIC, vendor-neutral skill
-// tags — never the vendor name itself — to keep cards free of internal infra
-// detail. An unknown service key is intentionally dropped rather than leaked, so
-// adding a new backend later cannot silently publish its name in a public card.
-const SERVICE_TAG = Object.freeze({
-  "vbcdx.forgejo/1": "code-host",
-  "vbcdx.coolify/1": "deployment",
-  // Descriptors keyed by server name, as packs were before contracts.
-  forgejo: "code-host",
-  coolify: "deployment",
-});
+// A remote capability is shown as a GENERIC, vendor-neutral tag, never the vendor
+// or service name, so a card carries no internal infra detail. The tag is the one
+// the role's own pack declares for that capability's contract (vbcdx-pack.json
+// `contract_tags`, a closed list of neutral words). A capability keyed by server
+// name, as packs were before contracts, is mapped to its contract through the
+// role's `dependencies`. A contract with no declared tag adds none: it is dropped
+// rather than leaked, so a new backend can never publish its name on a card.
+const CONTRACT_KEY = /^[a-z0-9][a-z0-9.-]{0,62}\/[1-9][0-9]{0,3}$/;
 
 // Strip a single trailing slash so URLs join cleanly.
 function trimTrailingSlash(url) {
@@ -107,7 +104,10 @@ function cardVersion(descriptor) {
 }
 
 // Vendor-neutral capability tags for a role's single skill.
-function skillTags(descriptor) {
+function skillTags(role) {
+  const descriptor = role.descriptor;
+  const declared = role.contractTags || {};
+  const deps = descriptor.dependencies || {};
   const tags = [];
   if (descriptor.policy && descriptor.policy.kind) tags.push(descriptor.policy.kind);
   const local = descriptor.local_capabilities || {};
@@ -116,8 +116,9 @@ function skillTags(descriptor) {
   if (local.web) tags.push("web");
   if (local.delegation) tags.push("delegation");
   const remote = descriptor.remote_capabilities || {};
-  for (const service of Object.keys(remote)) {
-    const tag = Object.hasOwn(SERVICE_TAG, service) ? SERVICE_TAG[service] : undefined;
+  for (const key of Object.keys(remote)) {
+    const contract = CONTRACT_KEY.test(key) ? key : Object.hasOwn(deps, key) ? deps[key] : undefined;
+    const tag = contract && Object.hasOwn(declared, contract) ? declared[contract] : undefined;
     if (tag && !tags.includes(tag)) tags.push(tag);
   }
   return tags;
@@ -125,12 +126,13 @@ function skillTags(descriptor) {
 
 // One AgentSkill per agent, representing its role. description falls back to the
 // full descriptor description if the policy has no summary.
-function roleSkill(descriptor) {
+function roleSkill(role) {
+  const descriptor = role.descriptor;
   return {
     id: descriptor.id,
     name: descriptor.name,
     description: (descriptor.policy && descriptor.policy.summary) || descriptor.description,
-    tags: skillTags(descriptor),
+    tags: skillTags(role),
   };
 }
 
@@ -161,7 +163,7 @@ export function buildAgentCard(role, baseUrl) {
     capabilities: { extensions: [discoveryOnlyExtension()] },
     defaultInputModes: [...DEFAULT_INPUT_MODES],
     defaultOutputModes: [...DEFAULT_OUTPUT_MODES],
-    skills: [roleSkill(descriptor)],
+    skills: [roleSkill(role)],
   };
 }
 

@@ -15,6 +15,7 @@ import { init, packageVersion } from "../src/index.js";
 import { EXIT, InstallerError } from "../src/errors.js";
 import { conflictLines } from "../src/executor.js";
 import { printable, printableValue } from "../src/install/args.js";
+import { redactTyped, shownWord } from "../src/shown.js";
 
 // The same escaping as bin/vbcdx.js: every write is passed through printable,
 // and each value placed in a line (a path, a role field, an error message) is escaped on its
@@ -24,8 +25,13 @@ const out = (text) => process.stdout.write(printable(text));
 const errOut = (text) => process.stderr.write(printable(text));
 const L = (strings, ...values) => strings.reduce((line, s, i) => line + printableValue(values[i - 1]) + s);
 // An error prints as "error: " and then lines of its own, one escaped value each. An error
-// that lists items carries its layout in details.lines.
-const errorText = (lines) => lines.map((l, i) => (i === 0 ? L`error: ${l}` : L`${l}`)).join("\n") + "\n";
+// that lists items carries its layout in details.lines. As in bin/vbcdx.js, a value typed on
+// the command line that isn't name-shaped prints as "<argument N>" (src/shown.js).
+const ARGV = process.argv.slice(2);
+const errorText = (lines) => lines.map((l, i) => {
+  const line = redactTyped(l, ARGV);
+  return i === 0 ? L`error: ${line}` : L`${line}`;
+}).join("\n") + "\n";
 const errorLines = (e) =>
   e instanceof InstallerError && e.details && Array.isArray(e.details.lines) ? e.details.lines : [e && e.message ? e.message : String(e)];
 
@@ -87,7 +93,7 @@ async function main() {
     return cmd === undefined ? 2 : 0;
   }
   if (cmd !== "init") {
-    errOut(L`Unknown command: ${cmd}` + "\n\n" + HELP);
+    errOut(L`Unknown command: ${shownWord(cmd)}` + "\n\n" + HELP);
     return EXIT.CONFIG;
   }
   // Deprecated alias for one release: the package is now @vbcdx/vbcdx.
@@ -122,6 +128,6 @@ async function main() {
 main().then((code) => process.exit(code), (err) => {
   // A bug: the message is one escaped value; the stack frames are this package's own.
   const frames = err && err.stack ? String(err.stack).split("\n").filter((l) => /^\s+at /.test(l)) : [];
-  errOut([L`fatal: ${err && err.message ? err.message : String(err)}`, ...frames.map((f) => L`${f}`)].join("\n") + "\n");
+  errOut([L`fatal: ${redactTyped(err && err.message ? err.message : String(err), ARGV)}`, ...frames.map((f) => L`${f}`)].join("\n") + "\n");
   process.exit(1);
 });

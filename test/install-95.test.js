@@ -741,7 +741,7 @@ test("with --env the configured directories win, as for init", () => withHome((h
 test("parseVbcdxArgs validates commands, kinds, names and options", () => {
   const ok = parseVbcdxArgs(["install", "agent", "qa-agent,code-agent", "--harness=claude", "--scope=project"]);
   assert.deepEqual([ok.kind, ok.names, ok.scope], ["agent", ["qa-agent", "code-agent"], "project"]);
-  assert.throws(() => parseVbcdxArgs(["list", "--harness=claude", "--profile=team"]), /Unknown or malformed option: --profile=team/);
+  assert.throws(() => parseVbcdxArgs(["list", "--harness=claude", "--profile=team"]), /Unknown or malformed option: --profile\.$/);
   const packs = parseVbcdxArgs(["install", "skill", "x", "--harness=claude", "--pack=a", "--pack=./b"]).packs;
   assert.deepEqual(packs, ["a", "./b"]);
   assert.deepEqual(parseVbcdxArgs(["packs", "--pack=a", "--json"]).packs, ["a"]);
@@ -838,7 +838,8 @@ test("CLI: control sequences in printed text reach the terminal escaped (review 
   const bad = join(home, "pkg\u001b[2K\u001b[31mSPOOFED\u2028x");
   const r = vbcdx(home, ["install", "tool", bad, "--harness=claude"]);
   assert.equal(r.status, EXIT.CONFIG);
-  assert.match(r.stderr, /No package directory at .*pkg\\u001b\[2K\\u001b\[31mSPOOFED\\u2028x/);
+  // The typed path isn't quoted back (it could be a pasted secret): it is named by position.
+  assert.match(r.stderr, /^error: No package directory at <argument 3>\.$/m);
   assert.equal(/[\u001b\u2028]/.test(r.stderr), false, "no raw control character is written");
 }));
 
@@ -902,7 +903,7 @@ test("CLI: an error holding a newline stays on one line; an error that lists ite
   const r = vbcdx(home, ["install", "tool", join(home, "missing\nerror: FORGED"), "--harness=claude"]);
   assert.equal(r.status, EXIT.CONFIG);
   assert.deepEqual(stderrLines(r).length, 1, r.stderr);
-  assert.match(r.stderr, /^error: No package directory at .*missing\\u000aerror: FORGED/);
+  assert.equal(r.stderr, "error: No package directory at <argument 3>.\n");
 
   const missing = vbcdx(home, ["install", "tool", "@example/not-installed-anywhere", "--harness=claude"], { npm_config_prefix: join(home, "npm-prefix") });
   assert.equal(missing.status, EXIT.CONFIG);
@@ -1004,9 +1005,9 @@ test("an integrations-file stdio service on Hermes starts the way the installed 
   const manifestFile = join(home, "forgejo.json");
   const integrations = join(home, "integrations.json");
   const cfg = join(home, "config.env");
-  const writeIntegrations = (contract) => {
+  const writeIntegrations = (contract, extra = {}) => {
     writeFileSync(manifestFile, JSON.stringify({ ...fullManifest(["get_issue", "whoami"]), contract }));
-    writeFileSync(integrations, JSON.stringify({ schema_version: 1, services: { forgejo: { server_name: "forgejo", manifest_file: manifestFile, credentials: { "review-agent": join(home, "creds", "review-agent.env") } } } }));
+    writeFileSync(integrations, JSON.stringify({ schema_version: 1, services: { forgejo: { server_name: "forgejo", manifest_file: manifestFile, credentials: { "review-agent": join(home, "creds", "review-agent.env") }, ...extra } } }));
   };
   writeFileSync(cfg, [`VBCDX_AGENTS_BASE_DIR=${home}/state`, `VBCDX_AGENTS_CREDENTIALS_DIR=${home}/creds`, `VBCDX_AGENTS_HERMES_HOME=${home}/hermes`,
     `VBCDX_AGENTS_INTEGRATIONS_FILE=${integrations}`, "VBCDX_AGENTS_USER_REVIEW_AGENT=u", "VBCDX_AGENTS_TOKEN_REVIEW_AGENT=t"].join("\n") + "\n");
@@ -1016,11 +1017,22 @@ test("an integrations-file stdio service on Hermes starts the way the installed 
   installAgent(ctx(), ["review-agent"]);
   const server = () => parsePy(read(join(home, "hermes", "profiles", "review-agent", "config.yaml"))).mcp_servers?.forgejo;
   assert.deepEqual(plain(server()), { command: "node", args: [join(pkg, "bin", "fj-tool.js"), "mcp"], env: { FJ_URL: "${FJ_URL}" }, tools: { include: ["get_issue", "whoami"], prompts: false, resources: false } });
-  // Another contract under the same name is not that tool, so the bundled companion table is
-  // consulted instead, and it has no launch for that contract.
+  // Another contract under the same name is not that tool, and nothing else says how to start
+  // it: no contract has a launch built in, so the install stops, naming both fixes.
   writeIntegrations("other.forge/1");
-  installAgent(ctx(), ["review-agent"], { force: true });
-  assert.equal(server(), undefined, "a contract with no companion and no matching installed tool gets no stdio server");
+  assert.throws(() => installAgent(ctx(), ["review-agent"], { force: true }), (err) => {
+    assert.equal(err.code, EXIT.CONFIG, err.message);
+    assert.match(err.message, /Service forgejo is a stdio service bound to a role, but nothing says how to start it: install its tool with `vbcdx install tool`, or give the service a "stdio" launch/);
+    return true;
+  });
+  // A launch declared in the integrations file starts it, for any contract, and wins over an
+  // installed tool of the same name and contract.
+  const launch = { command: "acme-forge", args: ["mcp"], env: ["ACME_FORGE_URL"] };
+  for (const contract of ["other.forge/1", "vbcdx.forgejo/1"]) {
+    writeIntegrations(contract, { stdio: launch });
+    installAgent(ctx(), ["review-agent"], { force: true });
+    assert.deepEqual(plain(server()), { command: "acme-forge", args: ["mcp"], env: { ACME_FORGE_URL: "${ACME_FORGE_URL}" }, tools: { include: ["get_issue", "whoami"], prompts: false, resources: false } }, contract);
+  }
 }));
 
 test("doctor checks the settings the package declares now, not the ones recorded at install", () => withHome((home) => {

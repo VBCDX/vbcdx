@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parseStrictJson } from "../config/json.js";
 import { configError } from "../errors.js";
+import { shownName } from "../shown.js";
 
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 // npm package names: optional @scope/, lowercase, no leading dot or underscore.
@@ -67,9 +68,9 @@ export function locatePackageDir(spec, { cwd = process.cwd(), home, packageRoot,
   if (isLocalPath(spec)) {
     const expanded = spec.startsWith("~") ? join(home || "", spec.slice(1)) : spec;
     dir = resolve(cwd, expanded);
-    if (!isDir(dir)) throw configError(`No package directory at ${dir}.`);
+    if (!isDir(dir)) throw configError(`No package directory at ${spec}.`);
   } else {
-    if (!PACKAGE_NAME_RE.test(spec)) throw configError(`${JSON.stringify(spec)} is not an npm package name or a path.`);
+    if (!PACKAGE_NAME_RE.test(spec)) throw configError(`${shownName(spec)} is not an npm package name or a path.`);
     for (const root of searchRoots({ cwd, packageRoot, npmGlobalRoot })) {
       const candidate = join(root, spec);
       if (existsSync(join(candidate, "package.json"))) {

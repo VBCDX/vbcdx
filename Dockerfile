@@ -25,6 +25,7 @@ WORKDIR /app
 COPY package.json ./
 COPY bin/a2a-server.js ./bin/a2a-server.js
 COPY src/errors.js ./src/errors.js
+COPY src/shown.js ./src/shown.js
 COPY src/a2a ./src/a2a
 COPY src/roles ./src/roles
 COPY src/skills ./src/skills

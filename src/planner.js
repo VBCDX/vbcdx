@@ -18,6 +18,7 @@ import { boundServiceTools } from "./renderers/native.js";
 import { sha256 } from "./fs/safe-writer.js";
 import { parseEnvText } from "./config/env-parser.js";
 import { configError, credentialError, conflictError, filesystemError } from "./errors.js";
+import { shownWord } from "./shown.js";
 import { isKnownRole } from "./roles/index.js";
 
 /** Find the top level of the containing Git worktree, or null. */
@@ -84,7 +85,7 @@ export function buildPlan(args, entries, { cwd = process.cwd(), integrations: in
     const r = getRole(id);
     if (!r) {
       const known = roleIds();
-      throw configError(`Unknown agent ID in selection: ${id} (not a role of a loaded agent pack). The loaded roles are: ${known.join(", ") || "none"}; \`vbcdx packs\` lists them by pack.`);
+      throw configError(`Unknown agent ID in selection: ${shownWord(id)} (not a role of a loaded agent pack). The loaded roles are: ${known.join(", ") || "none"}; \`vbcdx packs\` lists them by pack.`);
     }
     return r;
   });

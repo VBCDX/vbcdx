@@ -25,7 +25,7 @@
 
 import {
   openSync, closeSync, writeSync, fsyncSync, fchmodSync, renameSync, unlinkSync, mkdirSync,
-  lstatSync, fstatSync, readFileSync, existsSync, constants as fsc,
+  lstatSync, fstatSync, readFileSync, existsSync, linkSync, constants as fsc,
 } from "node:fs";
 import { dirname, join, isAbsolute, sep } from "node:path";
 import { createHash } from "node:crypto";
@@ -391,42 +391,206 @@ export function digestOf(absPath) {
 
 // ── Exclusive locks ─────────────────────────────────────────────────────────
 
+// A lock holds "<pid> <start time>\n": the start time (/proc/<pid>/stat field 22, clock ticks
+// since boot) tells a live holder from a later process that reused its PID. Where /proc is
+// absent, and in a lock from before this format, only the PID is there: a live PID then counts
+// as the holder. Liveness is `kill(pid, 0)`, so this assumes every run that shares a lock is in
+// one PID namespace (a holder in another one would look dead).
+function procStart(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    // The command (field 2) is in parentheses and may hold spaces; the fields after it are plain.
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    return fields[19] || null;
+  } catch {
+    return null;
+  }
+}
+// The holder as a message may show it: never its full argv (which can hold another process's
+// secrets once a PID is reused), only the program name, plus the subcommand words when it is
+// vbcdx; control characters stripped, length capped.
+export function holderCommand(argv) {
+  if (!argv.length) return null;
+  const base = (a) => a.split("/").pop();
+  const at = argv.findIndex((a) => /^vbcdx(\.js)?$/.test(base(a)));
+  const words = at >= 0 ? ["vbcdx", ...argv.slice(at + 1).filter((a) => /^[a-z][a-z-]*$/.test(a)).slice(0, 4)] : [base(argv[0])];
+  return words.join(" ").replace(/[\u0000-\u001f\u007f-\u009f]/g, "").slice(0, 80) || null;
+}
+function procCommand(pid) {
+  try {
+    return holderCommand(readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean));
+  } catch {
+    return null;
+  }
+}
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM"; // alive, owned by someone else
+  }
+}
+// An empty lock this young may be one a live process created and hasn't written yet (O_EXCL
+// create, then the write): it's never taken over before this age.
+export const LOCK_FRESH_MS = 5000;
+
+// A lock's identity and bytes, read without following a symlink or blocking on a FIFO.
+function readLock(lock) {
+  const st = lstatSync(lock);
+  if (!st.isFile()) return { st, text: null };
+  const fd = openSync(lock, fsc.O_RDONLY | fsc.O_NOFOLLOW | fsc.O_NONBLOCK);
+  try {
+    return { st, text: readFileSync(fd, "utf8") };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Who holds a lock file: {state: "free"} when there is none; {state: "stale", pid, reason, ino}
+ * when its holder can't be alive (its PID is dead, its start time shows the PID was reused, or it
+ * is empty and older than LOCK_FRESH_MS); otherwise {state: "held", pid, command, ageMs}. Anything
+ * else (a non-regular file, content in no format this version reads, a PID of 0) is held: refusing
+ * is the safe side. Reads only; dry runs use it too.
+ */
+export function lockHolder(lock, { now = Date.now() } = {}) {
+  let r;
+  try {
+    r = readLock(lock);
+  } catch (e) {
+    if (e && e.code === "ENOENT") return { state: "free" };
+    throw e;
+  }
+  const ageMs = Math.max(0, now - r.st.mtimeMs);
+  const held = (extra = {}) => ({ state: "held", pid: null, command: null, ageMs, ...extra });
+  if (r.text === null) return held({ note: "not a regular file" });
+  if (r.text === "") return ageMs < LOCK_FRESH_MS ? held() : { state: "stale", pid: null, reason: "it names no process", ino: r.st.ino };
+  const m = /^(\d+)(?: (\d+))?\n?$/.exec(r.text);
+  if (!m || Number(m[1]) <= 0) return held({ note: "in a format this version doesn't read" });
+  const pid = Number(m[1]);
+  if (!pidAlive(pid)) return { state: "stale", pid, reason: `process ${pid} is not running`, ino: r.st.ino };
+  const recorded = m[2] || null;
+  const now0 = procStart(pid);
+  if (recorded && now0 && recorded !== now0) return { state: "stale", pid, reason: `PID ${pid} now belongs to another process`, ino: r.st.ino };
+  // A lock without a start time (written before it was recorded) can't tell a reused PID from its
+  // holder, so a live PID there is taken as the holder.
+  return held({ pid, command: procCommand(pid) });
+}
+
+function heldMessage(p, h) {
+  const who = h.pid ? `process ${h.pid}${h.command ? ` (${h.command})` : ""}` : `another process${h.note ? ` (the lock is ${h.note})` : ""}`;
+  return `Another operation holds the lock for ${p}: ${who}, for ${Math.round(h.ageMs / 1000)} s. Retry after it finishes.`;
+}
+
+const defaultOnStale = (s) => process.stderr.write(`warning: took over the lock for ${s.path}: ${s.reason}.\n`);
+const ownToken = () => {
+  const start = procStart(process.pid);
+  return start ? `${process.pid} ${start}\n` : `${process.pid}\n`;
+};
+// Remove a lock only while it still carries this process's own token: never one another run
+// holds now.
+function removeOwn(lock, token) {
+  try {
+    const r = readLock(lock);
+    if (r.text === token) unlinkSync(lock);
+  } catch { /* gone already, or not ours */ }
+}
+
+/**
+ * Take over a stale lock, or say why not. Only one run takes over at a time: the takeover is done
+ * under a second O_EXCL lock, `<lock>.takeover`, and the lock is judged again under it. A fresh
+ * acquirer can't create the lock meanwhile (the stale file is still there), and no other taker
+ * can act, so the file renamed aside is the one judged stale; its inode is checked all the same,
+ * and put back if it isn't. Returns the stale verdict when it took the lock over; throws otherwise.
+ * A `.takeover` left by a run killed mid-takeover is never removed automatically (that would need
+ * the same guard again): the error names both files to remove by hand.
+ */
+function takeOver(p, lock, token, hooks) {
+  const mutex = `${lock}.takeover`;
+  let mfd;
+  try {
+    mfd = openSync(mutex, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL, 0o600);
+  } catch (e) {
+    if (!e || e.code !== "EEXIST") throw filesystemError(`Cannot take over the stale lock for ${p}: ${(e && e.code) || "error"}.`);
+    const mh = lockHolder(mutex);
+    if (mh.state === "stale") {
+      throw filesystemError(`A takeover of the stale lock for ${p} was interrupted (${mh.reason}). Remove ${lock} and ${mutex} by hand, then retry.`);
+    }
+    throw filesystemError(`Another run is taking over the stale lock for ${p}; retry after it finishes.`);
+  }
+  writeSync(mfd, Buffer.from(token));
+  closeSync(mfd);
+  try {
+    if (hooks.underTakeover) hooks.underTakeover(lock);
+    const h = lockHolder(lock);
+    if (h.state === "free") return null; // the caller tries O_EXCL again
+    if (h.state !== "stale") throw filesystemError(heldMessage(p, h));
+    const aside = `${lock}.stale-${process.pid}-${Date.now()}`;
+    if (hooks.beforeRename) hooks.beforeRename(lock);
+    renameSync(lock, aside);
+    if (lstatSync(aside).ino !== h.ino) {
+      // Not the file judged stale (impossible under the takeover lock, but never remove a live one).
+      try { linkSync(aside, lock); unlinkSync(aside); } catch { /* the path was retaken: leave both */ }
+      throw filesystemError(`The lock for ${p} changed during takeover; retry.`);
+    }
+    try {
+      unlinkSync(aside);
+    } catch (e) {
+      process.stderr.write(`warning: could not remove ${aside} (${(e && e.code) || "error"}); remove it by hand.\n`);
+    }
+    return h;
+  } finally {
+    removeOwn(mutex, token);
+  }
+}
+
 /**
  * Acquire exclusive lockfiles for a set of destinations, in a stable sorted
  * order to avoid deadlock. Returns a release() function. Dry-run callers must
- * not call this. A lockfile is `<path>.lock` created with O_EXCL.
+ * not call this. A lockfile is `<path>.lock` created with O_EXCL, holding this
+ * process's `<pid> <start time>`; release removes only a lock that still holds it.
+ *
+ * A lock whose holder can't be alive (lockHolder: stale) is taken over (see takeOver), and
+ * `onStale` ({path, pid, reason}) is told; by default a warning goes to stderr. `hooks`
+ * (afterJudge, underTakeover, beforeRename, afterTakeover) is a test seam only: a step injected
+ * between the judgement and the takeover, to test the interleavings.
  */
-export function acquireLocks(paths) {
+export function acquireLocks(paths, { onStale = defaultOnStale, hooks = {} } = {}) {
   requirePosix();
   const ordered = [...new Set(paths)].sort();
   const held = [];
+  const token = ownToken();
   try {
     for (const p of ordered) {
       assertNoSymlinkComponents(p);
       ensureDir(dirname(p));
       const lock = `${p}.lock`;
       let fd;
-      try {
-        fd = openSync(lock, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL, 0o600);
-      } catch (err) {
-        if (err && err.code === "EEXIST") {
-          throw filesystemError(`Another operation holds the lock for ${p}; retry after it releases.`);
+      for (let attempt = 0; fd === undefined; attempt++) {
+        if (attempt > 2) throw filesystemError(`Cannot acquire lock for ${p}: it keeps changing; retry.`);
+        try {
+          fd = openSync(lock, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL, 0o600);
+        } catch (err) {
+          if (!err || err.code !== "EEXIST") throw filesystemError(`Cannot acquire lock for ${p}: ${(err && err.code) || "error"}.`);
+          const h = lockHolder(lock);
+          if (h.state === "free") continue;
+          if (h.state !== "stale") throw filesystemError(heldMessage(p, h));
+          if (hooks.afterJudge) hooks.afterJudge(lock);
+          const taken = takeOver(p, lock, token, hooks);
+          if (taken) onStale({ path: p, pid: taken.pid, reason: taken.reason });
+          if (hooks.afterTakeover) hooks.afterTakeover(lock);
         }
-        throw filesystemError(`Cannot acquire lock for ${p}: ${err.code || "error"}.`);
       }
-      writeSync(fd, Buffer.from(`${process.pid}\n`));
+      writeSync(fd, Buffer.from(token));
       closeSync(fd);
       held.push(lock);
     }
   } catch (err) {
-    for (const lock of held.reverse()) {
-      try { unlinkSync(lock); } catch { /* ignore */ }
-    }
+    for (const lock of held.reverse()) removeOwn(lock, token);
     throw err;
   }
   return function release() {
-    for (const lock of held.reverse()) {
-      try { unlinkSync(lock); } catch { /* ignore */ }
-    }
+    for (const lock of held.reverse()) removeOwn(lock, token);
   };
 }

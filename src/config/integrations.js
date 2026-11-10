@@ -8,13 +8,14 @@
 // configuration, and never reaches the network. Offline agreement proves
 // interface compatibility only, not live registration.
 
-import { readFileSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync, statSync } from "node:fs";
+import { dirname, isAbsolute } from "node:path";
 import { parseStrictJson } from "./json.js";
 import { normalizeSuffix } from "../roles/registry.js";
 import { isKnownRole } from "../roles/index.js";
 import { configError, conflictError } from "../errors.js";
 import { validateServiceUrl } from "./config.js";
+import { ARG_RE, BIN_RE, ENV_NAME_RE } from "../install/tool-declaration.js";
 
 // The two contracts the bundled tool packages implement. Any other contract is accepted:
 // a tool binds to a role only where the role's descriptor lists its contract, so an
@@ -88,6 +89,42 @@ export function validateManifest(obj, service, source) {
   return names;
 }
 
+/**
+ * Read the integrations file only if no one but its owner can change it: it says which
+ * program Hermes starts for a stdio service, so whoever can write or replace it could run
+ * a command as the Hermes user. It must be a regular file (not a symlink) owned by the
+ * effective user or root and writable by no one else, in a directory no one else can
+ * write to unless the directory is sticky. Checked on the open file, so it can't be
+ * swapped between the check and the read. A refusal names the path only.
+ */
+function readTrustedJsonFile(absPath, label) {
+  const refuse = (why) => configError(`Refusing the ${label} ${absPath}: ${why}. It decides which programs are started, so only its owner may be able to change it.`);
+  let dir;
+  try {
+    dir = statSync(dirname(absPath));
+  } catch (err) {
+    throw configError(`Cannot read ${label}: ${absPath} (${err.code || "read error"}).`);
+  }
+  if ((dir.mode & 0o022) !== 0 && (dir.mode & 0o1000) === 0) throw refuse("its directory can be written by others");
+  let fd;
+  try {
+    fd = openSync(absPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (err) {
+    if (err.code === "ELOOP") throw refuse("it is a symlink");
+    throw configError(`Cannot read ${label}: ${absPath} (${err.code || "read error"}).`);
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw refuse("it is not a regular file");
+    const euid = typeof process.geteuid === "function" ? process.geteuid() : st.uid;
+    if (st.uid !== euid && st.uid !== 0) throw refuse("it is owned by another user");
+    if ((st.mode & 0o022) !== 0) throw refuse("it can be written by others");
+    return parseStrictJson(readFileSync(fd, "utf8"), absPath);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function readJsonFile(absPath, label) {
   let raw;
   try {
@@ -115,9 +152,9 @@ export function isCleartextOffHost(value) {
  * Validates structure and manifests globally; per-role credential-file access
  * is checked later against the selection.
  *
- * A service uses the companion's stdio transport by default, binding a role
- * through an explicit credential-file mapping (`credentials`). With
- * `transport: "http"` it is reached at `url` (the companion's network mode,
+ * A service uses the stdio transport by default (started by its `stdio` launch, or
+ * its installed tool's), binding a role through an explicit credential-file mapping
+ * (`credentials`). With `transport: "http"` it is reached at `url` (the server's network mode,
  * e.g. through an MCP gateway), identity travels per request in a header the
  * harness supplies, and roles are bound by an explicit `roles` list — there is
  * no credential file for that service.
@@ -127,7 +164,7 @@ export function isCleartextOffHost(value) {
  *   url:string|null, roles:string[], credentials: Record<string,string>}>}}
  */
 export function loadIntegrations(absPath) {
-  const root = readJsonFile(absPath, "integrations file");
+  const root = readTrustedJsonFile(absPath, "integrations file");
   if (!root || typeof root !== "object") throw configError(`Integrations file ${absPath} is not an object.`);
   onlyKeys(root, ["schema_version", "services"], "integrations file");
   if (root.schema_version !== 1) throw conflictError(`Integrations file has unsupported schema_version ${root.schema_version}.`);
@@ -142,7 +179,7 @@ export function loadIntegrations(absPath) {
       throw configError(`Service name ${JSON.stringify(name)} in integrations file is reserved: its token key would be one the installer already uses. Pick another name.`);
     }
     if (!svc || typeof svc !== "object") throw configError(`Service ${name} must be an object.`);
-    onlyKeys(svc, ["server_name", "manifest_file", "credentials", "transport", "url", "roles", "tool_prefix", "allow_cleartext", "git_url", "git_roles"], `service ${name}`);
+    onlyKeys(svc, ["server_name", "manifest_file", "credentials", "transport", "url", "roles", "tool_prefix", "allow_cleartext", "git_url", "git_roles", "stdio"], `service ${name}`);
     const transport = svc.transport === undefined ? "stdio" : svc.transport;
     if (transport !== "stdio" && transport !== "http") {
       throw configError(`Service ${name} transport must be "stdio" or "http".`);
@@ -189,6 +226,10 @@ export function loadIntegrations(absPath) {
     } else if (svc.url !== undefined || svc.roles !== undefined || svc.tool_prefix !== undefined || svc.allow_cleartext !== undefined) {
       throw configError(`Service ${name}: url, roles, tool_prefix and allow_cleartext are only valid with transport "http".`);
     }
+    if (svc.stdio !== undefined && transport !== "stdio") {
+      throw configError(`Service ${name}: stdio is only valid with transport "stdio".`);
+    }
+    const stdio = svc.stdio === undefined ? null : parseStdioLaunch(name, svc.stdio);
     // Hermes git: where the role's Forgejo token clones from and pushes to its fork.
     // Only for a Forgejo-contract service over http: the token is the one the profile's .env holds.
     let gitUrl = null;
@@ -249,7 +290,38 @@ export function loadIntegrations(absPath) {
       credentials,
       gitUrl,
       gitRoles,
+      ...(stdio ? { stdio } : {}),
     };
   }
   return { services };
+}
+
+/**
+ * A stdio service's declared launch: how the harness starts its MCP server, in the
+ * shapes a tool declaration (vbcdx.json) uses. `command` is a program name on PATH,
+ * `args` are lowercase words and bare --flags, and `env` names the variables it reads;
+ * each is rendered as a reference to the variable, never a value. The result has the
+ * shape of an installed tool's launch: {command, args, env: {NAME: "${NAME}"}}.
+ */
+function parseStdioLaunch(name, launch) {
+  const where = `Service ${name} stdio`;
+  if (!launch || typeof launch !== "object" || Array.isArray(launch)) throw configError(`${where} must be an object.`);
+  onlyKeys(launch, ["command", "args", "env"], `service ${name} stdio`);
+  if (typeof launch.command !== "string" || !BIN_RE.test(launch.command)) {
+    throw configError(`${where}.command must be a program name: 1-64 characters of lowercase letters, digits, ".", "_" and "-", starting with a letter or digit.`);
+  }
+  const args = launch.args === undefined ? [] : launch.args;
+  if (!Array.isArray(args) || args.length > 16 || !args.every((a) => typeof a === "string" && ARG_RE.test(a))) {
+    throw configError(`${where}.args must be at most 16 subcommand words or bare --flags (lowercase letters and single hyphens).`);
+  }
+  const envNames = launch.env === undefined ? [] : launch.env;
+  if (!Array.isArray(envNames) || envNames.length > 64 || !envNames.every((e) => typeof e === "string" && ENV_NAME_RE.test(e))) {
+    throw configError(`${where}.env must be at most 64 variable names (uppercase letters, digits and "_", starting with a letter).`);
+  }
+  if (new Set(envNames).size !== envNames.length) throw configError(`${where}.env lists a variable twice.`);
+  return Object.freeze({
+    command: launch.command,
+    args: Object.freeze([...args]),
+    env: Object.freeze(Object.fromEntries(envNames.map((e) => [e, "${" + e + "}"]))),
+  });
 }

@@ -11,6 +11,7 @@
 import { isAbsolute } from "node:path";
 import { HARNESSES, isSafeId } from "../roles/registry.js";
 import { configError } from "../errors.js";
+import { shownOption, shownWord } from "../shown.js";
 
 function parseSelection(raw) {
   const items = raw.split(",").map((s) => s.trim());
@@ -18,7 +19,7 @@ function parseSelection(raw) {
   const out = [];
   for (const item of items) {
     if (item === "") throw configError("--agents contains an empty item.");
-    if (!isSafeId(item)) throw configError(`--agents has an unknown agent ID: ${item}.`);
+    if (!isSafeId(item)) throw configError(`--agents has an unknown agent ID: ${shownWord(item)}.`);
     if (!seen.has(item)) {
       seen.add(item);
       out.push(item);
@@ -72,12 +73,12 @@ export function parseInitArgs(argv) {
       case "--dry-run": opts.dryRun = true; break;
       case "--quiet": opts.quiet = true; break;
       default:
-        throw configError(`Unknown or malformed option: ${arg}.`);
+        throw configError(`Unknown or malformed option: ${shownOption(arg)}.`);
     }
   }
 
   if (!opts.harness) throw configError(`--harness is required (${HARNESSES.join("|")}).`);
-  if (!HARNESSES.includes(opts.harness)) throw configError(`Unsupported --harness: ${opts.harness}.`);
+  if (!HARNESSES.includes(opts.harness)) throw configError(`Unsupported --harness: ${shownWord(opts.harness)}.`);
   if (!opts.env) throw configError("--env is required (an absolute path to the literal config file).");
   if (!isAbsolute(opts.env)) throw configError("--env must be an absolute path.");
   // Packs from a lock written by `vbcdx fetch`, read offline.
@@ -92,7 +93,7 @@ export function parseInitArgs(argv) {
   } else {
     if (opts.scope === null) opts.scope = "user";
     if (!["user", "project"].includes(opts.scope)) {
-      throw configError(`Unsupported --scope: ${opts.scope}. Use user or project (local/global are not scopes).`);
+      throw configError(`Unsupported --scope: ${shownWord(opts.scope)}. Use user or project (local/global are not scopes).`);
     }
   }
 

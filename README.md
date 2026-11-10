@@ -16,14 +16,59 @@ vbcdx ships no agents of its own. Install an agent pack next to it, for example
 
 ## Requirements
 
-- Node.js 22 or later
-- A POSIX system (Linux or macOS)
+- Linux or macOS
+- Node.js 22 or later, with the npm it ships (npm 10)
+- For `vbcdx install service …` (the sidecar and the server services; Linux with systemd, as
+  root): the `passwd` package, which provides `useradd`. A minimal Debian 13 image may not have
+  it, and has no `sudo` or `curl`.
+- For agents, skills and tools (`vbcdx install agent|skill|tool`): one of Claude Code, Codex,
+  OpenCode or Hermes Agent, installed and run once so its home exists (`~/.claude`, `~/.codex`,
+  `~/.config/opencode`, `~/.hermes`), or its home set with its own variable (for Claude Code,
+  `CLAUDE_CONFIG_DIR`). vbcdx stops rather than create a harness home.
+
+### Node.js 22 on Linux
+
+Distribution packages can be older than 22: on Debian 13, `apt install nodejs` gives Node 20.19,
+which is below the minimum, and npm then only warns. Check with `node -v`. The official release
+tarball works on any glibc Linux. As root, on Debian or Ubuntu:
+
+```sh
+apt-get update && apt-get install -y curl ca-certificates xz-utils passwd
+V=v22.23.4   # any Node 22 release listed at https://nodejs.org/dist/
+A=x64        # or arm64
+curl -fsSLO "https://nodejs.org/dist/$V/node-$V-linux-$A.tar.xz"
+curl -fsSL "https://nodejs.org/dist/$V/SHASUMS256.txt" | grep " node-$V-linux-$A.tar.xz\$" | sha256sum -c -
+tar -xJf "node-$V-linux-$A.tar.xz" -C /usr/local --strip-components=1 --no-same-owner
+rm "node-$V-linux-$A.tar.xz"
+node -v      # v22.…
+```
+
+On macOS, use the installer from [nodejs.org](https://nodejs.org/) (Node 22 LTS).
 
 ## Install
 
+First set the `@vbcdx` scope's registry, in the npm config of the user who runs vbcdx, to the
+registry you install from. Until the public release that is the test registry, whose address comes
+from your operator; reading it needs no login. (Without this line npm takes `@vbcdx/vbcdx` from the
+public registry, which holds only an older release without the service commands.)
+
+```sh
+npm config set @vbcdx:registry https://<registry>/
+```
+
+Then install:
+
 ```sh
 npm install -g @vbcdx/vbcdx
+vbcdx --version
 ```
+
+vbcdx uses the same npm config when it fetches a service (`vbcdx install service … --version`).
+
+**For `sudo vbcdx …`:** the service commands run as root, so install vbcdx for root too (the
+tarball above puts `node`, `npm` and then `vbcdx` in `/usr/local/bin`, on root's PATH), and set any
+registry line in root's npm config. If you installed Node and vbcdx only as your own user (nvm, or a
+user npm prefix), `sudo vbcdx` fails with `sudo: vbcdx: command not found`.
 
 Agent packs and tool packages are npm packages too. Install them the same way, or point
 vbcdx at a local checkout:
@@ -35,7 +80,21 @@ npm install -g @vbcdx/dev-agents-plugin @vbcdx/forgejo-plugin
 ## Quick start
 
 Install every role of the dev agent pack into Claude Code, give the roles the Forgejo
-tools, and check the result:
+tools, and check the result. Claude Code must be installed and have run once on this host, so
+that `~/.claude` exists (see [Requirements](#requirements)). If its configuration is somewhere else,
+point vbcdx at it first, with `export CLAUDE_CONFIG_DIR=<its configuration directory>` (or pass
+`--env=<absolute path of its config file>`). vbcdx never creates it: without one, these commands
+stop with `No claude configuration found at …` (exit 2).
+
+On a host with no Claude Code yet, install it and run it once (see Claude Code's own
+[setup docs](https://docs.anthropic.com/en/docs/claude-code/setup)). `claude --version` alone doesn't
+create `~/.claude`; `claude config list` does, even before you sign in (it then reports
+`Not logged in` and exits 1, which is fine here):
+
+```sh
+npm install -g @anthropic-ai/claude-code
+claude config list
+```
 
 ```sh
 vbcdx install tool @vbcdx/forgejo-plugin --harness=claude
@@ -56,6 +115,31 @@ vbcdx doctor --harness=claude
 
 Rerunning a command changes nothing. `vbcdx remove tool forgejo --harness=claude` takes
 the entry out again.
+
+## Services
+
+vbcdx also installs the VBCDX services, verified against the release keys it pins, as systemd
+units. These commands run as root (Linux; see [Requirements](#requirements)):
+
+```
+vbcdx install service sidecar|control-plane|dispatch-server|keyhole-server [--version <v>] [--dry-run]
+vbcdx remove  service <service> [--wipe] [--dry-run]
+vbcdx doctor  --service <service>
+vbcdx service <service> status|start|stop|restart|logs [--follow]
+vbcdx config  service sidecar|keyhole|dispatch <args…>      the service's own commands, through the sidecar
+vbcdx list    services
+```
+
+- [docs/sidecar.md](docs/sidecar.md): the sidecar, on each host where agents run.
+- [docs/control-plane.md](docs/control-plane.md): the control plane (auth and registry), its tunnel,
+  connecting sidecars, users and workspaces.
+- [docs/dispatch-server.md](docs/dispatch-server.md): the Dispatch server, next to the control plane.
+- [docs/keyhole-server.md](docs/keyhole-server.md): the Keyhole server, on the control plane's host (installer 0.2.5 or later).
+- [docs/security.md](docs/security.md): what this protects: the secrets and where they live, what you trust, how to cut access off, and this release's limits.
+
+`--version` names a release of the service's npm package (`@vbcdx/sidecar`, which also carries
+the control plane, `@vbcdx/dispatch` or `@vbcdx/keyhole`). See what is published with
+`npm view @vbcdx/sidecar versions dist-tags` (or that package's name).
 
 ## Commands
 
@@ -115,9 +199,15 @@ An agent pack is an npm package with a `vbcdx-pack.json` at its root:
   "roles_dir": "roles",
   "roles": ["code-agent", "review-agent"],
   "skills_dir": "skills",
-  "contracts": ["vbcdx.forgejo/1"]
+  "contracts": ["vbcdx.forgejo/1"],
+  "contract_tags": { "vbcdx.forgejo/1": "code-host" }
 }
 ```
+
+`contract_tags` (optional) gives a contract the vendor-neutral tag that an A2A agent card shows
+for a role using it: one of `code-host`, `deployment`, `issue-tracker`, `messaging`, `secrets`,
+`storage` or `ci`. Each key must be in `contracts`. A contract with no tag adds none to the card,
+and that holds for the bundled contracts too.
 
 Each role is a directory `roles/<id>/` with:
 
@@ -305,7 +395,7 @@ hermes -p code-agent chat
 - **Web search** for roles that use it: set `VBCDX_AGENTS_HERMES_WEB_SEARCH_URL` to a
   LiteLLM gateway and `VBCDX_AGENTS_HERMES_WEB_SEARCH_TOOL` to a search tool configured
   on it.
-- **Git for roles:** `git_url` and `git_roles` on a Forgejo service in the
+- **Git for roles:** `git_url` and `git_roles` on a `vbcdx.forgejo/1` service in the
   [integrations file](#integrations-file) give chosen roles a `hermes-git` helper that
   clones through the role's own fork and opens pull requests, or clones read-only.
 - Each profile's `.env` belongs to you; vbcdx never writes it. Profiles share the host,
@@ -332,9 +422,30 @@ exported tool manifest and the roles it binds to:
 }
 ```
 
+The file decides which programs are started (below), so it is read only when no one but its
+owner can change it: a regular file (not a symlink) owned by you or root, writable by no one
+else, in a directory no one else can write to unless the directory is sticky. Otherwise vbcdx
+stops with exit 2 and names the file.
+
 A tool binds to a role only when it is in both the role's allow-list and the service's
 manifest. `http:` URLs are accepted only for loopback addresses, or with
 `"allow_cleartext": true`.
+
+A service without `"transport": "http"` is started over stdio. For Hermes, say how to start it:
+either install its tool with `vbcdx install tool` (it then starts the way its `vbcdx.json`
+declares), or give the service a `stdio` launch in the same shapes:
+
+```json
+"stdio": { "command": "example-tracker", "args": ["mcp"], "env": ["EXAMPLE_TRACKER_URL"] }
+```
+
+`command` is a program name on `PATH`, `args` are subcommand words and bare `--flags`, and `env`
+names the variables the server reads; each is written as a reference to the variable, never its
+value. A launch here is used before an installed tool's. A Hermes role bound to a stdio service
+with neither is an error (exit 2) that names both fixes, for every contract alike.
+
+`git_url` and `git_roles` belong to the `vbcdx.forgejo/1` contract: they are accepted only on a
+service whose manifest reports that contract, over `"transport": "http"` (see Hermes Agent above).
 
 ## Updates and conflicts
 

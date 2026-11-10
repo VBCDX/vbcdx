@@ -30,7 +30,7 @@ test("--agents dedupes, preserves order, rejects a malformed id", () => {
 
 test("dsh is not a harness and --profile is not an option", () => {
   assert.throws(() => parseInitArgs(["--harness=dsh", "--env=/c"]), /Unsupported --harness: dsh/);
-  assert.throws(() => parseInitArgs(["--harness=claude", "--env=/c", "--profile=web"]), /Unknown or malformed option: --profile=web/);
+  assert.throws(() => parseInitArgs(["--harness=claude", "--env=/c", "--profile=web"]), /Unknown or malformed option: --profile\.$/);
   assert.throws(() => parseInitArgs(["--env=/c"]), /--harness is required \(claude\|codex\|opencode\|hermes\)/);
 });
 

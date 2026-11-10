@@ -18,5 +18,9 @@
   "contracts": [
     "vbcdx.coolify/1",
     "vbcdx.forgejo/1"
-  ]
+  ],
+  "contract_tags": {
+    "vbcdx.coolify/1": "deployment",
+    "vbcdx.forgejo/1": "code-host"
+  }
 }

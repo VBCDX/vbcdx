@@ -33,9 +33,10 @@ const re = (s) => new RegExp(s.pattern);
 
 const SERVER_NAME_RE = re(P.server_name);
 const CONTRACT_RE = re(P.contract);
-const BIN_RE = re(D.binName);
-const ARG_RE = re(D.args.items);
-const ENV_NAME_RE = re(D.envName);
+// Exported: an integrations-file stdio launch is held to the same shapes.
+export const BIN_RE = re(D.binName);
+export const ARG_RE = re(D.args.items);
+export const ENV_NAME_RE = re(D.envName);
 const HTTP_PATH_RE = re(P.http.properties.path);
 const HTTP_PATH_DOT_RE = re(P.http.properties.path.not);
 const CRED_ARG_RE = re(P.credential_file.properties.argument);

@@ -39,6 +39,7 @@ const PACK_RE = {
   roleId: re(PACK.$defs.roleId),
   contract: re(PP.contracts.items),
   varName: re(PP.vars.propertyNames),
+  tagContract: re(PP.contract_tags.propertyNames),
   varLine: re(PP.vars.additionalProperties.properties.default),
 };
 
@@ -124,6 +125,24 @@ export function validatePackDeclaration(decl) {
   // roles.items is a $ref: check against the definition it points to (its maxLength included).
   if ("roles" in decl) checkStringList(decl.roles, { ...PP.roles, items: PACK.$defs.roleId }, PACK_RE.roleId, "roles", "role id (lowercase hyphenated words)", errors);
   if ("contracts" in decl) checkStringList(decl.contracts, PP.contracts, PACK_RE.contract, "contracts", "contract (<name>/<major>)", errors);
+  // A vendor-neutral tag per contract, for the A2A cards: keys in contracts, values
+  // from the schema's closed list.
+  if ("contract_tags" in decl) {
+    const t = decl.contract_tags;
+    const node = PP.contract_tags;
+    if (!isObject(t)) errors.push("contract_tags must be an object.");
+    else {
+      if (Object.keys(t).length > node.maxProperties) errors.push(`contract_tags has more than ${node.maxProperties} contracts.`);
+      const listed = Array.isArray(decl.contracts) ? decl.contracts : [];
+      for (const [contract, tag] of Object.entries(t)) {
+        if (!PACK_RE.tagContract.test(contract)) { errors.push(`contract_tags: ${JSON.stringify(contract)} is not a contract (<name>/<major>).`); continue; }
+        if (!listed.includes(contract)) errors.push(`contract_tags: ${contract} is not listed in contracts.`);
+        if (!node.additionalProperties.enum.includes(tag)) {
+          errors.push(`contract_tags.${contract} must be one of ${node.additionalProperties.enum.join(", ")}; got ${JSON.stringify(tag)}.`);
+        }
+      }
+    }
+  }
   // Variables a pack's prompts use, each with a neutral default.
   if ("vars" in decl) {
     const v = decl.vars;
@@ -269,8 +288,8 @@ function packSubdir(dir, rel, key, source) {
  * Read an agent pack from its package directory: the declaration, then every listed
  * role. Every problem in the declaration is reported together; a role's problems are
  * reported with the role named. Returns a frozen pack:
- *   { name, description, package, version, dir, rolesDir, skillsDir, contracts,
- *     roles: [{ id, prompt, descriptor, pack }] }
+ *   { name, description, package, version, dir, rolesDir, skillsDir, contracts, contractTags,
+ *     roles: [{ id, prompt, descriptor, pack, contractTags }] }
  */
 export function readPack(packageDir, { spec } = {}) {
   const dir = realpathSync(packageDir);
@@ -286,6 +305,7 @@ export function readPack(packageDir, { spec } = {}) {
   const rolesDir = packSubdir(dir, decl.roles_dir, "roles_dir", source);
   const skillsDir = decl.skills_dir === undefined ? null : packSubdir(dir, decl.skills_dir, "skills_dir", source);
   const contracts = Object.freeze([...(decl.contracts || [])]);
+  const contractTags = Object.freeze({ ...(decl.contract_tags || {}) });
 
   const roles = decl.roles.map((id) => {
     const roleDir = packSubdir(dir, `${decl.roles_dir}/${id}`, `role ${id}`, source);
@@ -316,10 +336,11 @@ export function readPack(packageDir, { spec } = {}) {
     rolesDir,
     skillsDir,
     contracts,
+    contractTags,
     // name -> default value, for the {{vars.<name>}} references in the pack's prompts
     vars: Object.freeze(Object.fromEntries(Object.entries(decl.vars || {}).map(([k, v]) => [k, v.default]))),
   };
-  pack.roles = Object.freeze(roles.map((r) => Object.freeze({ ...r, pack: pack.name })));
+  pack.roles = Object.freeze(roles.map((r) => Object.freeze({ ...r, pack: pack.name, contractTags })));
   return Object.freeze(pack);
 }
 

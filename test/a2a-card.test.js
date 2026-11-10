@@ -210,3 +210,29 @@ test("skill tags are vendor-neutral (generic categories, not backend names)", ()
     }
   }
 });
+
+// A card's remote-capability tags come from the role's own pack (contract_tags), the same
+// for a first-party contract and anyone else's: no contract has a tag built in.
+test("a capability's tag is the one its pack declares for the contract, for any contract", () => {
+  const base = getRole("code-agent");
+  const tagsOf = (descriptor, contractTags) => buildAgentCard({ ...base, descriptor: { ...base.descriptor, ...descriptor }, contractTags }, BASE).skills[0].tags;
+  const remote = (tags) => tags.filter((t) => !base.descriptor.policy || t !== base.descriptor.policy.kind).filter((t) => !/^filesystem:|^(shell|web|delegation)$/.test(t));
+  // A third-party contract with a declared tag shows it; the same contract undeclared shows none.
+  assert.deepEqual(remote(tagsOf({ remote_capabilities: { "acme.tracker/1": ["list"] }, dependencies: {} }, { "acme.tracker/1": "issue-tracker" })), ["issue-tracker"]);
+  assert.deepEqual(remote(tagsOf({ remote_capabilities: { "acme.tracker/1": ["list"] }, dependencies: {} }, {})), []);
+  // A first-party contract gets nothing a third party can't: undeclared, it shows no tag either.
+  assert.deepEqual(remote(tagsOf({ remote_capabilities: { "vbcdx.forgejo/1": ["whoami"] }, dependencies: {} }, {})), []);
+  assert.deepEqual(remote(tagsOf({ remote_capabilities: { "vbcdx.forgejo/1": ["whoami"] }, dependencies: {} }, undefined)), []);
+  // A capability keyed by server name takes its contract from the role's dependencies.
+  assert.deepEqual(remote(tagsOf({ remote_capabilities: { tracker: ["list"] }, dependencies: { tracker: "acme.tracker/1" } }, { "acme.tracker/1": "issue-tracker" })), ["issue-tracker"]);
+  assert.deepEqual(remote(tagsOf({ remote_capabilities: { tracker: ["list"] }, dependencies: {} }, { "acme.tracker/1": "issue-tracker" })), [], "a name with no dependency: no contract, no tag");
+  assert.deepEqual(remote(tagsOf({ remote_capabilities: { constructor: ["x"] }, dependencies: {} }, { constructor: "ci" })), [], "an inherited key is never a tag");
+  // Two capabilities with one tag show it once.
+  assert.deepEqual(remote(tagsOf({ remote_capabilities: { "a.b/1": ["x"], "c.d/1": ["y"] }, dependencies: {} }, { "a.b/1": "ci", "c.d/1": "ci" })), ["ci"]);
+});
+
+test("the fixture pack's roles carry its contract_tags", () => {
+  for (const [id, role] of allRoles()) {
+    assert.deepEqual({ ...role.contractTags }, { "vbcdx.coolify/1": "deployment", "vbcdx.forgejo/1": "code-host" }, id);
+  }
+});

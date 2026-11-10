@@ -28,6 +28,7 @@ import { mcpTarget, renderMcpEntry, skillTarget } from "./harness-targets.js";
 import { planEntryWrite, planEntryRemove } from "./config-entry.js";
 import { resolveToolPackage, runToolManifest, binLaunch } from "./tool-package.js";
 import { readToolDeclaration, envForMode } from "./tool-declaration.js";
+import { shownName } from "../shown.js";
 import { packageVersion } from "../index.js";
 import { InstallerError, configError, conflictError } from "../errors.js";
 
@@ -187,8 +188,8 @@ export function installAgent(ctx, roleIds, { force = false, dryRun = false } = {
   const manifest = loadManifest(ctx);
   const installed = installedToolBindings(ctx, manifest, roleIds);
   const integrations = ctx.config.integrationsFile ? null : installed;
-  // With an integrations file, a Hermes stdio service still starts the way the installed
-  // tool of that name and contract declares, instead of the bundled companion table.
+  // With an integrations file, a Hermes stdio service with no `stdio` launch of its own
+  // starts the way the installed tool of that name and contract declares.
   const launches = ctx.config.integrationsFile && installed
     ? Object.fromEntries(Object.entries(installed.services).filter(([, s]) => s.stdio).map(([name, s]) => [name, { contract: s.contract, stdio: s.stdio }]))
     : null;
@@ -258,7 +259,7 @@ function findSkill(name) {
   const all = catalogueSkills();
   const hit = all.find((s) => s.stem.toLowerCase() === lower || s.name === name);
   const known = all.map((s) => (typeof s.name === "string" && s.name !== s.stem.toLowerCase() ? `${s.name} (or ${s.stem.toLowerCase()})` : s.stem.toLowerCase()));
-  if (!hit) throw configError(`Unknown skill ${JSON.stringify(name)}. Available: ${known.join(", ") || "none"}.`);
+  if (!hit) throw configError(`Unknown skill ${shownName(name)}. Available: ${known.join(", ") || "none"}.`);
   // Skill harnesses read the directory name; OpenCode requires it to equal `name` (opencode.ai/docs/skills).
   if (typeof hit.name !== "string" || !SKILL_NAME_RE.test(hit.name) || typeof hit.description !== "string" || !hit.description) {
     throw configError(`Skill ${hit.relPath} needs frontmatter with a lowercase-hyphenated name and a description.`);
@@ -384,7 +385,7 @@ export function remove(ctx, kind, name, { force = false, dryRun = false } = {}) 
   if (kind === "tool") {
     const key = Object.keys(manifest.tools).find((k) => k.startsWith(`${ctx.harness}:${scopeId(ctx)}:`) &&
       (manifest.tools[k].server_name === name || manifest.tools[k].package === name));
-    if (!key) throw configError(`No tool ${JSON.stringify(name)} is recorded as installed for ${ctx.harness} (${scopeId(ctx)}).`);
+    if (!key) throw configError(`No tool ${shownName(name)} is recorded as installed for ${ctx.harness} (${scopeId(ctx)}).`);
     const tool = manifest.tools[key];
     const ent = tool.entry ? manifest.entries[tool.entry] : null;
     if (ent) {
@@ -402,10 +403,14 @@ export function remove(ctx, kind, name, { force = false, dryRun = false } = {}) 
     } catch (err) {
       if (!(err instanceof InstallerError)) throw err;
     }
+    // Install only ever writes a SKILL_NAME_RE name, so no other is recorded as installed: say so
+    // before a path is built from it (an error quoting that path would echo the typed value).
+    if (!SKILL_NAME_RE.test(installedName)) throw configError(`Skill ${shownName(name)} is not recorded as installed.`);
     const dest = skillTarget(ctx, installedName);
     if (!dest) throw conflictError(`Skills are not supported for the ${ctx.harness} harness.`);
     const rec = manifest.files[dest];
-    if (!rec || !rec.skill) throw configError(`Skill ${name} is not recorded as installed at ${dest}.`);
+    // Name the skills directory, not a path built from the typed name (that would quote it).
+    if (!rec || !rec.skill) throw configError(`Skill ${shownName(name)} is not recorded as installed in ${dirname(dirname(dest))}.`);
     steps.push({ path: dest, step: planFileRemove(dest, rec), drop: (m) => { delete m.files[dest]; }, dir: dirname(dest) });
   } else if (kind === "agent") {
     const roots = agentRoots(ctx, name);

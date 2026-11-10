@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { parse as yamlParse } from "yaml";
 import { getRole } from "../src/roles/index.js";
 import { renderHermes, HERMES_KEY_ENV, HERMES_PROVIDER_NAME } from "../src/renderers/hermes.js";
+import { EXIT } from "../src/errors.js";
 import { HERMES_TARGET, hermesToolsets, hermesDisabledToolsets, HERMES_KNOWN_TOOLSETS, HERMES_PLATFORMS, HERMES_TOOLSET_OVERLAPS, HERMES_OVERLAP_LEGACY_DENY, HERMES_RECOVERED_TOOLSETS, HERMES_RUNTIME_GATED_TOOLSETS, HERMES_PLUGIN_TOOLSETS, HERMES_RETIRED_TOOLSETS } from "../src/renderers/native.js";
 import { loadConfig, loadHermesRouting } from "../src/config/config.js";
 import { parseInitArgs } from "../src/cli/args.js";
@@ -153,7 +154,8 @@ test("model routing renders a named custom provider with key_env and never a key
 });
 
 test("bound service credentials land in SOUL.md, only for mapped roles", () => {
-  const integrations = { services: { forgejo: { serverName: "forgejo", tools: ["whoami", "create_comment", "merge_pull_request"], credentials: { "code-agent": "/abs/creds/code-agent.env" } } } };
+  const stdio = { command: "vbcdx-forgejo", args: ["mcp"], env: {} };
+  const integrations = { services: { forgejo: { serverName: "forgejo", tools: ["whoami", "create_comment", "merge_pull_request"], credentials: { "code-agent": "/abs/creds/code-agent.env" }, stdio } } };
   const soul = files(renderHermes(getRole("code-agent"), { integrations }))["SOUL.md"];
   assert.match(soul, /credential_file="\/abs\/creds\/code-agent.env"/);
   assert.match(soul, /whoami/);
@@ -161,10 +163,11 @@ test("bound service credentials land in SOUL.md, only for mapped roles", () => {
   assert.doesNotMatch(files(renderHermes(getRole("pm-agent"), { integrations }))["SOUL.md"], /Bound service credentials/);
 });
 
-test("bound roles get a companion MCP entry whose include list is exactly the bound tools", () => {
+test("bound roles get the service's declared stdio launch, with an include list of exactly the bound tools", () => {
+  const launch = (name) => ({ command: `vbcdx-${name}`, args: ["mcp"], env: { [`VBCDX_${name.toUpperCase()}_URL`]: `\${VBCDX_${name.toUpperCase()}_URL}`, [`VBCDX_${name.toUpperCase()}_WRITES`]: `\${VBCDX_${name.toUpperCase()}_WRITES}` } });
   const integrations = { services: {
-    forgejo: { serverName: "forgejo", contract: "vbcdx.forgejo/1", tools: ["whoami", "create_comment", "merge_pull_request"], credentials: { "code-agent": "/abs/creds/code-agent.env" } },
-    coolify: { serverName: "coolify", contract: "vbcdx.coolify/1", tools: ["health", "deploy"], credentials: { "devops-agent": "/abs/creds/devops-agent.env" } },
+    forgejo: { serverName: "forgejo", contract: "vbcdx.forgejo/1", tools: ["whoami", "create_comment", "merge_pull_request"], credentials: { "code-agent": "/abs/creds/code-agent.env" }, stdio: launch("forgejo") },
+    coolify: { serverName: "coolify", contract: "vbcdx.coolify/1", tools: ["health", "deploy"], credentials: { "devops-agent": "/abs/creds/devops-agent.env" }, stdio: launch("coolify") },
   } };
   const code = yamlParse(files(renderHermes(getRole("code-agent"), { integrations }))["config.yaml"]);
   assert.deepEqual(Object.keys(code.mcp_servers), ["forgejo"]); // code-agent has no coolify allowlist
@@ -180,6 +183,19 @@ test("bound roles get a companion MCP entry whose include list is exactly the bo
   assert.equal(pm.mcp_servers, undefined); // unmapped role: nothing bound, nothing rendered
   const raw = files(renderHermes(getRole("code-agent"), { integrations }))["config.yaml"];
   assert.doesNotMatch(raw, /credential_file|\/abs\/creds/); // the credential path lives in SOUL.md only
+});
+
+test("a bound stdio service with no launch is refused, the same for every contract", () => {
+  for (const contract of ["vbcdx.forgejo/1", "vbcdx.coolify/1", "acme.forge/1"]) {
+    const integrations = { services: { forgejo: { serverName: "forgejo", contract, tools: ["whoami"], credentials: { "code-agent": "/abs/creds/code-agent.env" } } } };
+    assert.throws(() => renderHermes(getRole("code-agent"), { integrations }), (err) => {
+      assert.equal(err.code, EXIT.CONFIG, contract);
+      assert.match(err.message, /Service forgejo is a stdio service bound to a role, but nothing says how to start it/, contract);
+      return true;
+    });
+    // A role it isn't bound to renders as before.
+    assert.doesNotThrow(() => renderHermes(getRole("pm-agent"), { integrations }), contract);
+  }
 });
 
 test("Hermes routing config validation", () => {

@@ -20,6 +20,10 @@ import { dirname, resolve } from "node:path";
 import { parseEnvFile } from "../src/config/env-parser.js";
 import { overlayDirsFrom } from "../src/config/config.js";
 import { isLocalPath } from "../src/install/locate.js";
+import { refuseSecretArgs } from "../src/service/scan.js";
+import { redactTyped } from "../src/shown.js";
+import { isServiceCommand, parseServiceArgs } from "../src/service/args.js";
+import { runService, humanReport } from "../src/service/index.js";
 
 const HELP = `vbcdx — install agent packs, skills and MCP tools into your harness
 
@@ -35,6 +39,37 @@ Usage:
   vbcdx fetch   [--sources=<file>] [--lock=<file>] [--store=<dir>]
                                                      build time: fetch every source, write the lock
   vbcdx sources [--lock=<file>]                      the lock's sources: repo, ref and commit
+  vbcdx install service <service> [--instance <i>] [--version <v>|--from <dir>] [--service systemd|none]
+        [--no-start] [--force] [--allow-downgrade] [--dry-run] [--json]
+                                                     verify and install a service (from npm, or a release dir);
+                                                     over an installed instance, a setting you leave out is kept
+                                                     (--listen, --service none, --control-plane, --tunnel), and an
+                                                     older version is refused (exit 5) without --allow-downgrade;
+                                                     a config or unit file you edited is kept, or install refuses
+                                                     (exit 5) when it would change it; --force replaces it after
+                                                     saving your copy as <file>.vbcdx-old (refused if that exists).
+                                                     An edited file this install wouldn't change stays kept, even
+                                                     with --force
+    <service> is one of: sidecar, control-plane, dispatch-server, keyhole-server. The flags only one takes:
+      sidecar          [--listen unix:<path>|127.0.0.1:<port>] [--control-plane <conn>|--no-control-plane]
+                       [--enroll-token-file <0600 file>|--enroll-token-stdin]   (the enrollment token goes
+                       with --control-plane, from a file or stdin, never as an argument)
+      control-plane    [--tunnel <host>:<port> --tunnel-name <name sidecars dial>|--no-tunnel]   (root only)
+      dispatch-server  --link-listen <host>:<port> --control-url https://<host>:<port>
+                       [--listen <host>:<port>] [--public-url <url>] [--service-cert <file>]   (root only)
+      keyhole-server   the dispatch-server flags (--link-listen on loopback only), and
+                       --control-ca <file> (required on the first install)   (root only)
+      dispatch-server and keyhole-server: a --listen on a network address also needs
+                       --expose-on-network --i-understand-network-exposure
+  vbcdx remove  service <service> [--instance <i>] [--wipe] [--dry-run] [--json]
+                                                     remove what install wrote (--wipe: state too)
+  vbcdx list    services [--json]                    installed instances, versions, unit state
+  vbcdx doctor  --service <service> [--instance <i>] [--json]
+                                                     check an install (exit 0 when healthy)
+  vbcdx service <service> status|start|stop|restart|logs [--follow] [--instance <i>]
+  vbcdx config  service sidecar|keyhole|dispatch …   run a command of the installed sidecar's vbcdx-svc
+                                                     (e.g. config service dispatch messages send <ws> --body …);
+                                                     config service <svc> --help: that area's own commands
   vbcdx --help | --version
 
 Harnesses: claude, codex, opencode, hermes
@@ -60,6 +95,14 @@ Options:
 Agent packs and tool packages are not installed from the registry: npm install -g <package>
 first, or list them in vbcdx.sources.json, run vbcdx fetch at build time and pass --lock.
 No credential or endpoint value is ever accepted on the command line.
+
+Exit codes:
+  0  success
+  2  invalid command, option or configuration
+  3  credential file problem
+  4  filesystem error (permissions, ownership, lock, write)
+  5  conflict, unsupported scope, or a failed doctor check
+  6  a tool command failed or timed out
 `;
 
 // Each value placed in a report line (a package name, a path, a tool's error) is escaped
@@ -69,8 +112,14 @@ const L = (strings, ...values) => strings.reduce((line, s, i) => line + printabl
 // An error prints as "error: " and then lines of its own: each line is one escaped value,
 // so a parser's code frame quoting a config file, a path or a tool's output can never add
 // a line. An error that lists items carries its layout in details.lines.
+// No value typed on the command line comes back in an error unless it is name-shaped: one that
+// isn't (a path, or a secret pasted into the wrong slot) prints as "<argument N>" (src/shown.js).
+const ARGV = process.argv.slice(2);
 function errorText(lines) {
-  return lines.map((l, i) => (i === 0 ? L`error: ${l}` : L`${l}`)).join("\n") + "\n";
+  return lines.map((l, i) => {
+    const line = redactTyped(l, ARGV);
+    return i === 0 ? L`error: ${line}` : L`${line}`;
+  }).join("\n") + "\n";
 }
 function errorLines(e) {
   if (e instanceof InstallerError && e.details && Array.isArray(e.details.lines)) return e.details.lines;
@@ -139,12 +188,83 @@ function humanDoctor(report) {
   return lines.join("\n");
 }
 
+// `vbcdx <command> --help`: that command's entries from HELP's Usage block (one source, so the
+// two can't drift), plus the shared Harnesses/Options text for the commands that take --harness.
+// The service forms (install|remove service, list services, doctor --service) take none of those
+// options, so they get the Usage entries only. The Exit codes block is the root help's alone.
+// `vbcdx config --help` gets its entry here, but `vbcdx config service <svc> … --help` goes on
+// to the sidecar's vbcdx-svc, which prints that area's own commands.
+const COMMAND_HELP = Object.freeze({
+  config: { entry: /^  vbcdx config /, options: false },
+  install: { entry: /^  vbcdx install[ |]/, options: true },
+  remove: { entry: /^  vbcdx (remove|install\|remove) /, options: true },
+  doctor: { entry: /^  vbcdx doctor /, options: true },
+  list: { entry: /^  vbcdx list /, options: true },
+  service: { entry: /^  vbcdx service /, options: false },
+  packs: { entry: /^  vbcdx packs /, options: true },
+  fetch: { entry: /^  vbcdx fetch /, options: true },
+  sources: { entry: /^  vbcdx sources /, options: true },
+});
+
+function usageEntries() {
+  const lines = HELP.split("\n");
+  const entries = [];
+  for (let i = lines.indexOf("Usage:") + 1; i < lines.length && lines[i] !== ""; i++) {
+    if (lines[i].startsWith("  vbcdx ")) entries.push([lines[i]]);
+    else if (entries.length) entries[entries.length - 1].push(lines[i]);
+  }
+  return entries.map((e) => e.join("\n"));
+}
+
+/** The help for one command, or null when it has none of its own. */
+function commandHelp(argv) {
+  const cmd = argv[0];
+  const spec = Object.hasOwn(COMMAND_HELP, cmd) ? COMMAND_HELP[cmd] : null;
+  if (!spec) return null;
+  if (cmd === "config" && argv[1] === "service") return null;
+  const picked = usageEntries().filter((e) => spec.entry.test(e));
+  const serviceForm = argv[1] === "service" || argv[1] === "services" || argv.some((a) => a === "--service" || a.startsWith("--service="));
+  const options = spec.options && !serviceForm
+    ? "\n" + HELP.slice(HELP.indexOf("Harnesses:"), HELP.indexOf("\nExit codes:"))
+    : "\n";
+  return `Usage:\n${picked.join("\n")}\n${options}All commands: vbcdx --help\n`;
+}
+
 const out = (text) => process.stdout.write(printable(text));
 const err = (text) => process.stderr.write(printable(text));
 
 async function main() {
   const argv = process.argv.slice(2);
   const cmd = argv[0];
+  // A secret on argv is refused before anything else reads the arguments, for
+  // every command; the message names the argument's position, never its value.
+  try {
+    refuseSecretArgs(argv);
+  } catch (e) {
+    err(errorText(errorLines(e)));
+    return e.code;
+  }
+  // `vbcdx <command> … --help` (or -h) prints that command's help and exits 0, before any
+  // parser sees the arguments: no option is consumed as a value, nothing runs.
+  if (argv.length > 1 && (argv.includes("--help") || argv.includes("-h"))) {
+    const text = commandHelp(argv);
+    if (text !== null) {
+      out(text);
+      return EXIT.OK;
+    }
+  }
+  if (isServiceCommand(argv)) {
+    try {
+      const opts = parseServiceArgs(argv);
+      const { report, code, kind } = runService(opts);
+      // service <action> and config … wrote to the terminal themselves.
+      if (kind !== "passthrough") out((opts.json ? JSON.stringify(report, null, 2) : humanReport(kind, report)) + "\n");
+      return code;
+    } catch (e) {
+      err(errorText(errorLines(e)));
+      return e instanceof InstallerError ? e.code : EXIT.FILESYSTEM;
+    }
+  }
   if (cmd === "--version" || cmd === "-v") {
     out(packageVersion() + "\n");
     return EXIT.OK;
@@ -277,6 +397,6 @@ function packsReport(catalog) {
 main().then((code) => process.exit(code), (e) => {
   // A bug: the message is one escaped value; the stack frames are vbcdx's own.
   const frames = e && e.stack ? String(e.stack).split("\n").filter((l) => /^\s+at /.test(l)) : [];
-  err([L`fatal: ${e && e.message ? e.message : String(e)}`, ...frames.map((f) => L`${f}`)].join("\n") + "\n");
+  err([L`fatal: ${redactTyped(e && e.message ? e.message : String(e), ARGV)}`, ...frames.map((f) => L`${f}`)].join("\n") + "\n");
   process.exit(1);
 });

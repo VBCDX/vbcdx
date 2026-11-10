@@ -66,11 +66,13 @@ test("--quiet suppresses routine progress but not warnings", () => {
 test("the alias escapes control characters in what it echoes back", () => {
   const unknown = run(["bad\u001b[31mcmd‮"]);
   assert.equal(unknown.status, 2);
-  assert.match(unknown.stderr, /Unknown command: bad\\u001b\[31mcmd\\u202e/);
+  // A command that isn't name-shaped isn't quoted back at all.
+  assert.match(unknown.stderr, /Unknown command: <not shown>/);
   assert.doesNotMatch(unknown.stderr, /[\u001b‮]/);
   const bad = run(["init", "--harness=claude", PACK_ARG, "--env=/nonexistent/\u001b]0;pwned\u0007.env"]);
   assert.notEqual(bad.status, 0);
-  assert.match(bad.stderr, /error: Cannot read configuration file: \/nonexistent\/\\u001b\]0;pwned\\u0007\.env/);
+  // A typed path isn't quoted back in an error: it is named by its position.
+  assert.match(bad.stderr, /error: Cannot read configuration file: <argument 4>/);
   assert.doesNotMatch(bad.stderr + bad.stdout, /[\u0000-\u0008\u000b-\u001f\u007f]/);
 });
 
@@ -91,10 +93,10 @@ test("the alias escapes a path it prints on stdout", () => {
 test("the alias cannot be made to print a forged line by a newline in a value", () => {
   const bad = run(["init", "--harness=claude", PACK_ARG, "--env=/nonexistent/\nFORGED-LINE\t.env"]);
   assert.notEqual(bad.status, 0);
-  assert.match(bad.stderr, /error: Cannot read configuration file: \/nonexistent\/\\u000aFORGED-LINE\\u0009\.env/);
+  assert.match(bad.stderr, /error: Cannot read configuration file: <argument 4>/);
   assert.equal(bad.stderr.split("\n").some((l) => l.startsWith("FORGED-LINE")), false);
   const unknown = run(["bad\nFORGED-CMD"]);
-  assert.match(unknown.stderr, /Unknown command: bad\\u000aFORGED-CMD/);
+  assert.match(unknown.stderr, /Unknown command: <not shown>/);
   assert.equal(unknown.stderr.split("\n").some((l) => l.startsWith("FORGED-CMD")), false);
   const d = mkdtempSync(join(tmpdir(), "vbcdx-alias-nl-"));
   try {
