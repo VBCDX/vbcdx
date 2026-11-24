@@ -7,14 +7,14 @@
 // into the definition.
 
 import { stringify as yamlStringify } from "yaml";
-import { claudeLocalTools, boundServiceTools, mcpToolId, credentialBindingNote } from "./native.js";
+import { claudeLocalTools, boundServiceTools, mcpToolId, boundToolsNote } from "./native.js";
 
 export function renderClaude(role, { integrations } = {}) {
   const cap = role.descriptor.local_capabilities;
   const tools = claudeLocalTools(cap);
   const bindings = boundServiceTools(role.descriptor, integrations);
   for (const b of bindings) {
-    for (const t of b.tools) tools.push(mcpToolId("claude", b.server, (b.toolPrefix || "") + t));
+    for (const t of b.tools) tools.push(mcpToolId("claude", b.server, t));
   }
   // Serialize the frontmatter with a real YAML serializer so a description or
   // prompt can never break the document; tools is the documented comma list.
@@ -25,7 +25,8 @@ export function renderClaude(role, { integrations } = {}) {
     model: "inherit",
   }).trimEnd();
 
-  const body = role.prompt.trimEnd() + "\n" + credentialBindingNote(bindings);
+  const body = role.prompt.trimEnd() + "\n" + boundToolsNote(bindings);
+  // `body` always ends in "\n": boundToolsNote is "" or ends in one.
   const content = `---\n${frontmatter}\n---\n\n${body}`;
-  return { filename: `${role.id}.md`, content: content.endsWith("\n") ? content : content + "\n", mode: 0o644 };
+  return { filename: `${role.id}.md`, content, mode: 0o644 };
 }

@@ -30,10 +30,9 @@ export const SERVICES = Object.freeze({
   // release tree as the sidecar, so it is verified exactly as the sidecar is.
   "control-plane": { package: "@vbcdx/sidecar", binaries: ["vbcdx-control"], daemon: "vbcdx-control" },
   // The Dispatch and Keyhole servers: each its own signed release (published by the dispatch
-  // and keyhole repos' release jobs), verified exactly as the sidecar is. Plain "dispatch" and
-  // "keyhole" are config areas of the sidecar (args.js CONFIG_AREAS), not services to install.
-  // This version verifies them only: installing one is refused before
-  // anything is fetched (index.js planInstall, plan.js buildPlan).
+  // and keyhole repos' release jobs), verified exactly as the sidecar is, then installed as a
+  // control-plane service (plan.js buildPlan). Plain "dispatch" and "keyhole" are config areas
+  // of the sidecar (args.js CONFIG_AREAS), not services to install.
   "dispatch-server": { package: "@vbcdx/dispatch", binaries: ["dispatch"], daemon: "dispatch" },
   "keyhole-server": { package: "@vbcdx/keyhole", binaries: ["keyhole"], daemon: "keyhole" },
 });

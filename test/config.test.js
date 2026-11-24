@@ -8,12 +8,13 @@ function cfg(obj) {
   return new Map(Object.entries(obj));
 }
 
-test("requires BASE_DIR and CREDENTIALS_DIR", () => {
+test("requires BASE_DIR, and no credentials directory", () => {
   assert.throws(() => loadConfig(cfg({}), { harness: "claude", scope: "project" }), /BASE_DIR is required/);
-  assert.throws(
-    () => loadConfig(cfg({ VBCDX_AGENTS_BASE_DIR: "/b" }), { harness: "claude", scope: "project" }),
-    /CREDENTIALS_DIR is required/,
-  );
+  // The base directory alone is a complete configuration: no credential file is written,
+  // so no directory for one is asked for.
+  const c = loadConfig(cfg({ VBCDX_AGENTS_BASE_DIR: "/b" }), { harness: "claude", scope: "project" });
+  assert.equal(c.baseDir, "/b");
+  assert.equal("credentialsDir" in c, false);
 });
 
 test("rejects unknown VBCDX_AGENTS_ keys to catch typos", () => {

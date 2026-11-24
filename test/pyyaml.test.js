@@ -102,3 +102,75 @@ test("comments and untouched formatting survive an edit", () => {
   }
   assert.deepEqual(parsePy(merged).agent, { reasoning_effort: "high", disabled_toolsets: ["y"] });
 });
+
+// Numeric forms PyYAML resolves that the cases above do not exercise, the timestamp
+// serialiser, the two documented fallbacks that keep a scalar as text, and the merge
+// marker. Every non-printable character is built at run time.
+
+test("a binary integer is read as a number", () => {
+  // src/fs/pyyaml.js:30
+  assert.equal(parsePy("n: 0b1010").n, 10);
+});
+
+test("an octal integer written with a leading zero is read in base 8", () => {
+  // src/fs/pyyaml.js:32
+  assert.equal(parsePy("n: 010").n, 8);
+});
+
+test("a sexagesimal integer is summed in base 60", () => {
+  // src/fs/pyyaml.js:33 — the branch and its reduce callback
+  assert.equal(parsePy("n: 1:30").n, 90);
+});
+
+test("a sexagesimal float is summed in base 60", () => {
+  // src/fs/pyyaml.js:46 — the branch and its reduce callback
+  assert.equal(parsePy("n: 1:30.5").n, 90.5);
+});
+
+test("a timestamp read from a file serialises as its source text", () => {
+  // src/fs/pyyaml.js:70
+  assert.equal(JSON.stringify(parsePy("t: 2020-01-02")), '{"t":{"timestamp":"2020-01-02"}}');
+});
+
+test("an escaped string keeps a quote and a backslash escaped, and round-trips", () => {
+  // src/fs/pyyaml.js:90
+  const BS = String.fromCharCode(0x5c);
+  const value = 'a"b' + BS + "c" + String.fromCharCode(0x7f);
+  const text = stringifyPy([value]);
+  assert.ok(text.includes(BS + '"'), text);
+  assert.ok(text.includes(BS + BS), text);
+  assert.deepEqual(parsePy(text), [value]);
+});
+
+test("a tab inside an escaped string is written as an escape, never raw", () => {
+  // src/fs/pyyaml.js:92
+  const TAB = String.fromCharCode(0x09);
+  const value = TAB + String.fromCharCode(0x7f);
+  const text = stringifyPy([value]);
+  assert.ok(text.includes(String.fromCharCode(0x5c) + "t"), text);
+  assert.ok(!text.includes(TAB), text);
+  assert.deepEqual(parsePy(text), [value]);
+});
+
+test("a null created by the caller is written as null", () => {
+  // src/fs/pyyaml.js:115
+  assert.equal(stringifyPy({ a: null }), "a: null\n");
+});
+
+test("a bare = stays the text it is", () => {
+  // src/fs/pyyaml.js:151
+  assert.equal(parsePy("a: =").a, "=");
+});
+
+test("a plain scalar with a tab keeps the tab as text", () => {
+  // src/fs/pyyaml.js:159 — a quoted scalar takes the string tag and never runs this
+  const TAB = String.fromCharCode(0x09);
+  assert.equal(parsePy("a: x" + TAB + "y\n").a, "x" + TAB + "y");
+});
+
+test("a merge symbol is written as a bare merge key and read back as a merge", () => {
+  // src/fs/pyyaml.js:164
+  const text = stringifyPy(new Map([[Symbol("<<"), new Map([["reader", 1]])]]));
+  assert.ok(text.startsWith("<<:"), text);
+  assert.deepEqual(parsePy(text), { reader: 1 });
+});

@@ -278,7 +278,7 @@ test("Dockerfile places the entrypoint's import graph at resolvable in-image pat
   assert.ok(
     reachedRepo.has("src/a2a/server.js") &&
       reachedRepo.has("src/skills/catalogue.js") &&
-      reachedRepo.has("src/roles/registry.js"),
+      reachedRepo.has("src/packs/load.js"),
     `import walk did not reach expected modules; reached: ${[...reachedRepo].sort().join(", ")}`
   );
 });

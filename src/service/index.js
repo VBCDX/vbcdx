@@ -2,7 +2,7 @@
 // door (the service-CLI spec, Install and lifecycle). A release is verified before anything
 // is written; the plan --dry-run prints is exactly what install applies (apply.js).
 
-import { closeSync, constants, existsSync, fstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, readSync, rmSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, mkdtempSync, mkdirSync, openSync, readSync, rmSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { EXIT, conflictError, configError } from "../errors.js";
 import { hostPlatform, verifyRelease, SERVICES } from "./artifact.js";
@@ -112,12 +112,49 @@ export function readControlCA(opts) {
 // A vbx_enr_ token is far shorter; anything larger is not one, and is never read whole.
 const TOKEN_MAX = 4096;
 
+// How long stdin may take to deliver the token (piped from a slow command, e.g. a remote mint),
+// and how long to wait before trying an empty non-blocking stdin again.
+export const STDIN_WAIT_MS = 60_000;
+const STDIN_RETRY_MS = 20;
+
+/**
+ * Reads fd 0 to end of input, but at most `max + 1` bytes (one past the limit, so the caller can
+ * tell "too large" without reading the rest). A non-blocking stdin with nothing yet answers EAGAIN:
+ * that is waited out and tried again, until STDIN_WAIT_MS has passed. `io` is for
+ * tests: `read(buf, offset, length)`, `sleep(ms)` and `now()`.
+ */
+export function readStdinBounded(max, io = {}) {
+  const read = io.read || ((buf, off, len) => readSync(0, buf, off, len, null));
+  const sleep = io.sleep || ((ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms));
+  const now = io.now || Date.now;
+  const buf = Buffer.alloc(max + 1);
+  const deadline = now() + STDIN_WAIT_MS;
+  let n = 0;
+  while (n < buf.length) {
+    let k;
+    try {
+      k = read(buf, n, buf.length - n);
+    } catch (e) {
+      if (e.code === "EOF") break;
+      if (e.code !== "EAGAIN" && e.code !== "EWOULDBLOCK") throw e;
+      if (now() >= deadline) {
+        throw configError(`No enrollment token arrived on stdin within ${STDIN_WAIT_MS / 1000} s; nothing was written.`);
+      }
+      sleep(STDIN_RETRY_MS);
+      continue;
+    }
+    if (k === 0) break;
+    n += k;
+  }
+  return buf.subarray(0, n);
+}
+
 /**
  * The enrollment token, from a 0600 regular file the caller owns (opened without following a
  * symlink, and non-blocking, so a planted FIFO can't hang the installer) or from stdin: never
  * argv. Read before anything is written; its value is never printed.
  */
-export function readEnrollToken(opts, sys, readStdin = () => readFileSync(0)) {
+export function readEnrollToken(opts, sys, readStdin = () => readStdinBounded(TOKEN_MAX)) {
   if (!opts.enrollTokenFile && !opts.enrollTokenStdin) return null;
   let raw;
   if (opts.enrollTokenFile) {

@@ -2,7 +2,7 @@
 //
 // The manifest records, for each generated (non-secret) definition the
 // installer owns, the last-written digest, mode, owning package version, and
-// which role/harness produced it. Credential values and credential files are
+// which role/harness produced it. Credential values are
 // never recorded here. The classifier decides, for a planned write, whether it
 // is a fresh install, a no-op, a repair of a missing owned file, an ownership
 // respecting update, or a conflict that requires --force.

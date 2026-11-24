@@ -10,6 +10,12 @@
 // names, IP addresses and key-like runs. A description is free text, so a secret
 // made only of plain words cannot be ruled out; that boundary is stated in the schema.
 //
+// A tool that needs a key is not installed this way. A declaration that asks for one,
+// with `credential_file` (a per-call credential file) or an env item of kind
+// "credential", is refused: the key belongs in Keyhole, which hands it to the tool only
+// through the sidecar. Neither is in the schema any more; the refusal below names them
+// so the reason is said once, instead of "unknown field".
+//
 // The shipped JSON Schema (schema/vbcdx-tool.schema.json) holds every per-field rule,
 // and the patterns below are read from it so the two cannot drift. Six rules span
 // fields and live only here: http.port_env listed in env (and read in http mode), unique
@@ -39,7 +45,6 @@ export const ARG_RE = re(D.args.items);
 export const ENV_NAME_RE = re(D.envName);
 const HTTP_PATH_RE = re(P.http.properties.path);
 const HTTP_PATH_DOT_RE = re(P.http.properties.path.not);
-const CRED_ARG_RE = re(P.credential_file.properties.argument);
 const SCHEMA_REF_RE = re(P.$schema);
 const ENV_ITEM = P.env.items.properties;
 const DESC_RE = re(ENV_ITEM.description);
@@ -61,10 +66,13 @@ function isObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
-function checkKeys(obj, schemaNode, label, errors) {
+/** Why a declaration that asks for a key is refused, and where the key goes instead. */
+export const KEYED_TOOL_REFUSAL = "this tool needs a key; register it as a Keyhole tool (README, \"How a tool gets its key\")";
+
+function checkKeys(obj, schemaNode, label, errors, reported = []) {
   const allowed = Object.keys(schemaNode.properties);
   for (const k of Object.keys(obj)) {
-    if (!allowed.includes(k)) errors.push(`${label}: unknown field ${JSON.stringify(k)}.`);
+    if (!allowed.includes(k) && !reported.includes(k)) errors.push(`${label}: unknown field ${JSON.stringify(k)}.`);
   }
   for (const k of schemaNode.required) {
     if (!(k in obj)) errors.push(`${label}: missing required field ${k}.`);
@@ -111,7 +119,8 @@ function checkCommand(obj, schemaNode, label, errors) {
 export function validateToolDeclaration(decl, { pkg } = {}) {
   const errors = [];
   if (!isObject(decl)) return { ok: false, errors: ["vbcdx.json must be a JSON object."] };
-  checkKeys(decl, SCHEMA, "vbcdx.json", errors);
+  // credential_file gets its own refusal below, not "unknown field".
+  checkKeys(decl, SCHEMA, "vbcdx.json", errors, ["credential_file"]);
 
   if ("$schema" in decl && (typeof decl.$schema !== "string" || decl.$schema.length > P.$schema.maxLength || !SCHEMA_REF_RE.test(decl.$schema))) {
     errors.push("$schema must be a relative path ending in vbcdx-tool.schema.json (no URL).");
@@ -123,7 +132,7 @@ export function validateToolDeclaration(decl, { pkg } = {}) {
     errors.push("server_name must be 2-64 characters of lowercase letters, digits and hyphens, starting with a letter and not ending in a hyphen.");
   }
   if ("contract" in decl && (typeof decl.contract !== "string" || !CONTRACT_RE.test(decl.contract))) {
-    errors.push("contract must look like <name>/<major>, for example vbcdx.forgejo/1.");
+    errors.push("contract must look like <name>/<major>, for example acme.tracker/1.");
   }
 
   if ("stdio" in decl && checkCommand(decl.stdio, P.stdio, "stdio", errors)) {
@@ -171,7 +180,9 @@ export function validateToolDeclaration(decl, { pkg } = {}) {
             errors.push(`${label}.description looks like it holds a value (a URL, host, IP address or key-like run); describe the variable, never its value.`);
           }
         }
-        if ("kind" in item && !ENV_ITEM.kind.enum.includes(item.kind)) {
+        if ("kind" in item && item.kind === "credential") {
+          errors.push(`${label}.kind is "credential": ${KEYED_TOOL_REFUSAL}.`);
+        } else if ("kind" in item && !ENV_ITEM.kind.enum.includes(item.kind)) {
           errors.push(`${label}.kind must be one of ${ENV_ITEM.kind.enum.join(", ")}.`);
         }
         if ("required" in item && typeof item.required !== "boolean") {
@@ -208,17 +219,8 @@ export function validateToolDeclaration(decl, { pkg } = {}) {
     }
   }
 
-  if ("credential_file" in decl) {
-    const cf = decl.credential_file;
-    if (!isObject(cf)) {
-      errors.push("credential_file must be an object.");
-    } else {
-      checkKeys(cf, P.credential_file, "credential_file", errors);
-      if ("argument" in cf && (typeof cf.argument !== "string" || !CRED_ARG_RE.test(cf.argument))) {
-        errors.push("credential_file.argument must be a lower-case tool argument name.");
-      }
-    }
-  }
+  // Whatever it holds: its value is not looked at.
+  if ("credential_file" in decl) errors.push(`credential_file is no longer supported: ${KEYED_TOOL_REFUSAL}.`);
 
   return { ok: errors.length === 0, errors };
 }

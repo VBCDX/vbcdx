@@ -3,7 +3,7 @@
 // MCP tool packages across harnesses.
 //
 // Exit codes follow the installer taxonomy (src/errors.js): 0 ok; 2 CLI/config;
-// 3 credential; 4 filesystem; 5 conflict / unsupported / failed doctor check;
+// 3 not used; 4 filesystem; 5 conflict / unsupported / failed doctor check;
 // 6 native subprocess.
 
 import { packageVersion } from "../src/index.js";
@@ -99,7 +99,7 @@ No credential or endpoint value is ever accepted on the command line.
 Exit codes:
   0  success
   2  invalid command, option or configuration
-  3  credential file problem
+  3  not used (earlier versions: credential file problem)
   4  filesystem error (permissions, ownership, lock, write)
   5  conflict, unsupported scope, or a failed doctor check
   6  a tool command failed or timed out
@@ -141,7 +141,6 @@ function human(report) {
   } else if (report.kind === "agent") {
     lines.push(L`${verb} agents for ${report.harness} (${report.scope})`);
     for (const g of report.generated) lines.push(L`  ${g.role}: ${g.action} -> ${g.destination}`);
-    for (const c of report.credentials) lines.push(L`  credential ${c.service ? `${c.role}/${c.service}` : c.role}: ${c.action}`);
     if (report.integrations && report.integrations.length) lines.push(L`  bound tools: ${report.integrations.join(", ")}`);
     for (const o of report.overlays || []) lines.push(L`  overlay ${o.name} ${o.version} ${o.digest}`); // one parseable line per overlay
     for (const [k, v] of Object.entries(report.launchEnv || {})) lines.push(L`  launch with ${k}=${v}`);
@@ -185,6 +184,8 @@ function humanDoctor(report) {
     lines.push(L`  ${t.server} (${t.package}, ${t.scope}): ${t.ok ? "ok" : "FAIL"}`);
     for (const c of t.checks) lines.push(L`    ${c.ok ? "ok  " : "FAIL"} ${c.check}: ${c.detail}`);
   }
+  // Credential files an earlier version wrote: listed by path, never opened.
+  for (const l of report.leftovers) lines.push(L`  FAIL leftover credential file ${l.path}: ${l.detail}`);
   return lines.join("\n");
 }
 
@@ -362,10 +363,6 @@ async function main() {
       err(errorText([`${conflicts.length} item(s) would be refused (rerun with --force):`, ...conflictLines(conflicts, report.conflict_notes)]));
       return EXIT.CONFLICT;
     }
-    if (report.credential_errors && report.credential_errors.length) {
-      err(errorText(report.credential_errors));
-      return EXIT.CREDENTIAL;
-    }
     return EXIT.OK;
   } catch (e) {
     if (e instanceof InstallerError) {
@@ -395,7 +392,9 @@ function packsReport(catalog) {
 }
 
 main().then((code) => process.exit(code), (e) => {
-  // A bug: the message is one escaped value; the stack frames are vbcdx's own.
+  // A bug: the message is one escaped value; the stack frames are vbcdx's own. Keep: this is
+  // the only redaction on the crash path, and it is reachable on a damaged install, where
+  // --version reads package.json through packageVersion().
   const frames = e && e.stack ? String(e.stack).split("\n").filter((l) => /^\s+at /.test(l)) : [];
   err([L`fatal: ${redactTyped(e && e.message ? e.message : String(e), ARGV)}`, ...frames.map((f) => L`${f}`)].join("\n") + "\n");
   process.exit(1);

@@ -118,12 +118,12 @@ export const HERMES_RETIRED_TOOLSETS = Object.freeze(["messaging", "moa"]);
 export const HERMES_PLUGIN_TOOLSETS = Object.freeze(["a2a", "google_meet"]);
 
 // agent.disabled_toolsets subtracts a disabled toolset's *tools* by name after
-// the enabled ones are added (model_tools.py). A disabled toolset that shares a
-// tool with an allowed one would strip that tool, so such a toolset is left off the
-// deny-list (the per-platform allow-lists keep it disabled) and its legacy name, if
-// any, is denied instead. In v0.15.1 browser bundled web_search, so web roles
-// denied browser_tools rather than browser. In v0.21.5 no configurable toolset shares
-// a tool with an allowable one (the tests derive this from the fixture): browser is
+// the enabled ones are added (model_tools.py). A disabled toolset that shared a
+// tool with an allowed one would strip that tool; HERMES_TOOLSET_OVERLAPS and
+// HERMES_OVERLAP_LEGACY_DENY name those cases, and both are empty at v0.21.5 (the
+// tests derive that from the fixture), so neither map is read and the deny-list
+// below is a plain subtraction. Filling one without restoring the skip in
+// hermesDisabledToolsets would deny the toolset outright. browser is
 // denied outright, which also covers browser_exec and the browser_vault_* tools that
 // the legacy browser_tools name no longer includes.
 export const HERMES_TOOLSET_OVERLAPS = Object.freeze({});
@@ -134,10 +134,6 @@ export function hermesDisabledToolsets(cap) {
   const out = [];
   for (const t of HERMES_KNOWN_TOOLSETS) {
     if (allowed.has(t)) continue;
-    if ((HERMES_TOOLSET_OVERLAPS[t] || []).some((o) => allowed.has(o))) {
-      if (HERMES_OVERLAP_LEGACY_DENY[t]) out.push(HERMES_OVERLAP_LEGACY_DENY[t]);
-      continue;
-    }
     out.push(t);
   }
   return [...out, ...HERMES_RECOVERED_TOOLSETS, ...HERMES_PLUGIN_TOOLSETS, ...HERMES_RETIRED_TOOLSETS];
@@ -159,13 +155,13 @@ export function mcpToolId(harness, server, tool) {
 /**
  * Compute the bound service tools for a role given the validated integrations.
  * A tool is bound only if it is in BOTH the role's reviewed remote allowlist
- * AND the service manifest, AND the role has an explicit credential mapping for
- * that service. Never widens to a wildcard to recover a missing tool.
+ * AND the service manifest, AND the service's roles list names the role. Never
+ * widens to a wildcard to recover a missing tool.
  *
- * For a transport "http" service the explicit mapping is the service's roles
- * list and there is no credential file (identity travels per request).
+ * A binding carries no credential and no path to one: a tool that needs a key is
+ * not bound here at all (its key lives in Keyhole and reaches it through the sidecar).
  *
- * @returns {Array<{server:string, transport:string, credentialFile:string|null, url:string|null, tools:string[]}>}
+ * @returns {Array<{server:string, contract:string|null, stdio:object|null, tools:string[]}>}
  */
 export function boundServiceTools(descriptor, integrations) {
   const out = [];
@@ -178,40 +174,25 @@ export function boundServiceTools(descriptor, integrations) {
     const own = (k) => (k && Object.hasOwn(remote, k) ? remote[k] : undefined);
     const allowlist = own(svc.contract) || own(server);
     if (!allowlist || allowlist.length === 0) continue;
-    const transport = svc.transport || "stdio";
-    let credentialFile = null;
-    // An installed tool that takes no per-call credential file binds like http: by roles list.
-    if (transport === "http" || svc.credentialFree) {
-      if (!(svc.roles || []).includes(descriptor.id)) continue; // not listed -> no binding
-    } else {
-      credentialFile = svc.credentials ? svc.credentials[descriptor.id] : undefined;
-      if (!credentialFile) continue; // no explicit mapping -> no binding for this role
-    }
+    if (!(svc.roles || []).includes(descriptor.id)) continue; // not listed -> no binding
     const manifestSet = new Set(svc.tools);
     const tools = allowlist.filter((t) => manifestSet.has(t));
     if (tools.length === 0) continue;
-    // git only for roles listed in git_roles, with that role's mode
-    const gitMode = svc.gitUrl && svc.gitRoles && Object.hasOwn(svc.gitRoles, descriptor.id) ? svc.gitRoles[descriptor.id] : null;
-    out.push({ server, contract: svc.contract || null, transport, credentialFile, url: svc.url || null, toolPrefix: svc.toolPrefix || "", stdio: svc.stdio || null,
-      gitUrl: gitMode ? svc.gitUrl : null, gitMode, tools: [...tools].sort() });
+    out.push({ server, contract: svc.contract || null, stdio: svc.stdio || null, tools: [...tools].sort() });
   }
   return out;
 }
 
 /**
  * A plain-text note, appended to a rendered definition, telling the model which
- * absolute credential_file to pass for each bound service and which tools its
- * role may call. Contains the path only, never a credential value, and never
- * instructions to parse the file.
+ * tools of each bound service its role may call. It names servers and tools only:
+ * no credential, no file path and no argument that would carry one.
  */
-export function credentialBindingNote(bindings) {
+export function boundToolsNote(bindings) {
   if (!bindings.length) return "";
-  const lines = ["", "## Bound service credentials", ""];
+  const lines = ["", "## Bound service tools", ""];
   for (const b of bindings) {
-    const how = b.credentialFile
-      ? `pass \`credential_file="${b.credentialFile}"\` on every ${b.server} tool call.`
-      : `your identity is supplied by the connection; call ${b.server} tools without a credential_file argument.`;
-    lines.push(`- \`${b.server}\`: ${how} Tools available to your role: ${b.tools.join(", ")}.`);
+    lines.push(`- \`${b.server}\`: tools available to your role: ${b.tools.join(", ")}.`);
   }
   return lines.join("\n") + "\n";
 }

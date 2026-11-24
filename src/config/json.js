@@ -8,6 +8,12 @@
 
 import { configError } from "../errors.js";
 
+// The number grammar of RFC 8259: an optional minus, an integer with no leading zero, an
+// optional fraction carrying at least one digit, and an optional exponent carrying at least
+// one digit. The scanner below also accepts a bare "-", an empty fraction and an empty
+// exponent, so the scanned token is checked against this grammar before it is converted.
+const JSON_NUMBER = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$/;
+
 export function parseStrictJson(text, source = "<json>") {
   let i = 0;
   const n = text.length;
@@ -100,7 +106,9 @@ export function parseStrictJson(text, source = "<json>") {
       while (i < n && text[i] >= "0" && text[i] <= "9") i++;
     }
     const token = text.slice(start, i);
+    if (!JSON_NUMBER.test(token)) fail("invalid number");
     const num = Number(token);
+    // The grammar admits exponents whose value overflows to Infinity ("1e999").
     if (!Number.isFinite(num)) fail("invalid number");
     return num;
   }

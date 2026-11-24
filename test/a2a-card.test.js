@@ -236,3 +236,45 @@ test("the fixture pack's roles carry its contract_tags", () => {
     assert.deepEqual({ ...role.contractTags }, { "vbcdx.coolify/1": "deployment", "vbcdx.forgejo/1": "code-host" }, id);
   }
 });
+
+// ── descriptor defaults and fallbacks ────────────────────────────────────────
+
+// Each test overrides one descriptor field the builder defaults, so a mutant of
+// that one guard fails only its own test.
+function roleWith(overrides) {
+  const base = getRole("code-agent");
+  return { ...base, descriptor: { ...base.descriptor, ...overrides } };
+}
+
+test("a non-integer schema_version takes major 1", () => {
+  for (const schema_version of [undefined, "1"]) {
+    const built = buildAgentCard(roleWith({ schema_version }), BASE);
+    assert.equal(built.version, "1.0.0"); // src/a2a/card.js:98
+  }
+  // The integer arm is what the fallback is measured against.
+  assert.equal(buildAgentCard(roleWith({ schema_version: 3 }), BASE).version, "3.0.0");
+});
+
+test("a missing dependencies map resolves no service key", () => {
+  const built = buildAgentCard(roleWith({ dependencies: undefined, remote_capabilities: { tracker: ["list"] } }), BASE);
+  assert.deepEqual(built.skills[0].tags, ["implementer", "filesystem:read-write", "shell"]); // src/a2a/card.js:106
+});
+
+test("a missing local capabilities map adds no local tag", () => {
+  const built = buildAgentCard(roleWith({ local_capabilities: undefined }), BASE);
+  assert.deepEqual(built.skills[0].tags, ["implementer", "code-host"]); // src/a2a/card.js:109
+});
+
+test("a missing remote capabilities map adds no remote tag", () => {
+  const built = buildAgentCard(roleWith({ remote_capabilities: undefined }), BASE);
+  assert.deepEqual(built.skills[0].tags, ["implementer", "filesystem:read-write", "shell"]); // src/a2a/card.js:114
+});
+
+test("a policy without a summary falls back to the descriptor description", () => {
+  const base = getRole("code-agent");
+  for (const policy of [{ kind: base.descriptor.policy.kind }, undefined]) {
+    const descriptor = { ...base.descriptor, policy };
+    const built = buildAgentCard({ ...base, descriptor }, BASE);
+    assert.equal(built.skills[0].description, descriptor.description); // src/a2a/card.js:130
+  }
+});

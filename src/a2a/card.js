@@ -29,6 +29,7 @@
 // pushNotifications, or extendedAgentCard is implemented, so none is advertised.
 
 import { allRoles, getRole, roleIds } from "../roles/index.js";
+import { trimTrailingSlash } from "../skills/catalogue.js";
 
 // A2A protocol version negotiated on Major.Minor only ("Patch version numbers
 // SHOULD NOT be used in Agent Cards").
@@ -90,11 +91,6 @@ function cardDescription(descriptor) {
 // role's `dependencies`. A contract with no declared tag adds none: it is dropped
 // rather than leaked, so a new backend can never publish its name on a card.
 const CONTRACT_KEY = /^[a-z0-9][a-z0-9.-]{0,62}\/[1-9][0-9]{0,3}$/;
-
-// Strip a single trailing slash so URLs join cleanly.
-function trimTrailingSlash(url) {
-  return String(url).replace(/\/+$/, "");
-}
 
 // The card version is the agent definition's version, derived from the role
 // descriptor's schema_version as Major.0.0 (e.g. schema_version 1 -> "1.0.0").

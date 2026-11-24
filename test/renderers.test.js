@@ -71,7 +71,7 @@ test("bound service tools render only when an integration maps the role", () => 
       forgejo: {
         serverName: "forgejo",
         tools: ["whoami", "create_comment", "merge_pull_request"],
-        credentials: { "code-agent": "/abs/creds/code-agent.env" },
+        roles: ["code-agent"],
       },
     },
   };
@@ -80,10 +80,12 @@ test("bound service tools render only when an integration maps the role", () => 
   assert.match(out.content, /mcp__forgejo__create_comment/);
   // code-agent has no merge_pull_request in its allowlist -> not bound even if in manifest
   assert.doesNotMatch(out.content, /mcp__forgejo__merge_pull_request/);
-  assert.match(out.content, /credential_file="\/abs\/creds\/code-agent.env"/);
-  // A role with no mapping gets no binding note.
+  // The note names the server and the role's tools, and no credential file.
+  assert.match(out.content, /## Bound service tools\n\n- `forgejo`: tools available to your role: create_comment, whoami\.\n/);
+  assert.doesNotMatch(out.content, /credential/);
+  // A role with no mapping gets no binding note and no tool id.
   const pm = renderClaude(getRole("pm-agent"), { integrations });
-  assert.doesNotMatch(pm.content, /Bound service credentials/);
+  assert.doesNotMatch(pm.content, /Bound service|mcp__forgejo__/);
 });
 
 test("no rendered definition leaks a forbidden infra token", () => {

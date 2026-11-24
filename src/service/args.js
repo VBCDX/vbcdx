@@ -30,8 +30,6 @@ import { PROFILES, notInstallable } from "./plan.js";
 
 const VALUED = new Set(["--instance", "--version", "--from", "--service", "--listen", "--control-plane", "--tunnel",
   "--tunnel-name", "--enroll-token-file", "--link-listen", "--control-url", "--public-url", "--service-cert", "--control-ca"]);
-const FLAGS = new Set(["--expose-on-network", "--i-understand-network-exposure", "--no-start", "--dry-run",
-  "--json", "--wipe", "--follow", "--enroll-token-stdin", "--force", "--allow-downgrade", "--no-control-plane", "--no-tunnel"]);
 // Each command's options, as the parser allows them. `vbcdx --help` documents every one of them
 // (test/help-surface.test.js compares the two, so a new option can't land without its help line).
 export const INSTALL_COMMON = Object.freeze(["--instance", "--version", "--from", "--service", "--listen",

@@ -15,7 +15,10 @@ In this version:
 - it runs **on the control plane's host**: its link listener (`--link-listen`) is loopback only,
   because the control plane on the same host is the only thing that calls it;
 - it signs people in with local accounts (`AUTH_MODE=local`); single sign-on is not set up here;
-- it needs `@vbcdx/keyhole` **0.1.0-dev.2 or newer**, and refuses an older release;
+- it needs `@vbcdx/keyhole` **0.1.0-dev.2 or newer**, and refuses an older release: its `keyhole check`
+  and `--env-file` are what the unit's pre-start gate runs. The enrolment example below needs
+  **0.1.0-dev.10**, the first release that serves both routes its manifest declares (`granted-tools`
+  arrives there), and this page's examples are validated against **0.1.0-dev.12**;
 - the release is verified exactly as the sidecar's is, with the same pinned release key.
 
 **It makes a new, empty Keyhole.** It never takes over a Keyhole that was installed another way,
@@ -27,11 +30,13 @@ anything. Stop that one first, or give this one other addresses.
 
 You need, on the control plane's host:
 
-1. **The control plane, `@vbcdx/sidecar` 0.1.0-dev.2 or newer, with its tunnel listener**
+1. **The control plane, `@vbcdx/sidecar` 0.1.0-dev.16 or newer, with its tunnel listener**
    (`--tunnel` and `--tunnel-name`; see [control-plane.md](control-plane.md)). Keyhole fetches the
    control plane's signing keys from the tunnel, and `vbcdx-control services add` (which links
-   Keyhole) is in 0.1.0-dev.2 and later. A tool's private-address allowance (`keyhole tools
-   private-allow`) only takes effect on agents' sidecars of 0.1.0-dev.4 or newer; older ones ignore it.
+   Keyhole) is in 0.1.0-dev.2 and later, but the `--manifest` and `--capability` flags that command
+   needs are in 0.1.0-dev.16 and later: an older control plane answers with a usage error naming
+   neither. A tool's private-address allowance (`keyhole tools private-allow`) only takes effect on
+   agents' sidecars of 0.1.0-dev.4 or newer; older ones ignore it.
 2. **The tunnel's name**, the `--tunnel-name` the control plane was installed with. The control
    plane's tunnel certificate names only that, so Keyhole must reach the tunnel by that name (or
    that IP address). Check what the installed control plane uses:
@@ -70,10 +75,10 @@ registers it as `keyhole`, which is the name in `services add keyhole` and in th
 that names `keyhole-server`.
 
 ```sh
-sudo vbcdx install service keyhole-server --version 0.1.0-dev.2 \
+sudo vbcdx install service keyhole-server --version 0.1.0-dev.12 \
   --link-listen 127.0.0.1:8444 --control-url https://<tunnel name>:8443 \
   --control-ca /root/control-ca.pem --dry-run   # review the plan
-sudo vbcdx install service keyhole-server --version 0.1.0-dev.2 \
+sudo vbcdx install service keyhole-server --version 0.1.0-dev.12 \
   --link-listen 127.0.0.1:8444 --control-url https://<tunnel name>:8443 \
   --control-ca /root/control-ca.pem
 ```
@@ -107,17 +112,57 @@ install prints the next step.
 ## The link certificate
 
 1. Register Keyhole with the control plane, on this host. The CSR is a request, not a secret.
-   Copy it where `vbcdx-control` can read it:
+   Copy it where `vbcdx-control` can read it, and install Keyhole's manifest beside it: a release
+   ships the binary and its checksums, not a manifest, and enrolment reads one.
+
+   Keyhole's manifest is the suite's own, exactly as the control plane compiles it
+   (`schema/examples/manifest-keyhole.json` in `vbcdx-core`): the two routes Keyhole serves at its
+   root, and no agent routes. It is this, byte for byte:
+
+   ```json
+   {
+     "schema_version": 1,
+     "name": "keyhole",
+     "sidecar_prefix": null,
+     "routes": [
+       {
+         "op": "keyhole.resolve",
+         "method": "POST",
+         "path": "orgs/{org}/resolve",
+         "agent": false
+       },
+       {
+         "op": "keyhole.granted-tools",
+         "method": "POST",
+         "path": "orgs/{org}/granted-tools",
+         "agent": false
+       }
+     ]
+   }
+   ```
+
+   Save it as `/root/keyhole.manifest.json`; the manifest copy below reads from that path, and if you
+   keep it somewhere else, use that path there instead. In a checkout of `VBCDX/vbcdx`,
+   `docs/manifests/keyhole.json` already holds these bytes.
 
    ```sh
    sudo install -o vbcdx-control -g vbcdx-control -m 0644 /var/lib/vbcdx-keyhole/default/link.csr \
      /var/lib/vbcdx-control/default/keyhole.csr
+   sudo install -o vbcdx-control -g vbcdx-control -m 0644 /root/keyhole.manifest.json \
+     /var/lib/vbcdx-control/default/keyhole.manifest.json
    sudo runuser -u vbcdx-control -- /usr/local/lib/vbcdx/control-plane/current/vbcdx-control \
      services add keyhole --url https://127.0.0.1:8444 \
      --csr /var/lib/vbcdx-control/default/keyhole.csr \
      --cert-out /var/lib/vbcdx-control/default/keyhole.crt \
+     --manifest /var/lib/vbcdx-control/default/keyhole.manifest.json \
+     --capability resolver \
      --instance default --instance-dir /etc/vbcdx-control/default
    ```
+
+   `--capability resolver` is the operator's grant, not part of the manifest: the control plane
+   forwards sealed-value resolves only to the service the operator grants `resolver`, and these
+   two routes are that contract's. Without the flag it refuses this manifest (`… is a resolver
+   route and keyhole is not the resolver`).
 
    The `--url` is `https://` plus this install's `--link-listen`, with no path: Keyhole serves its
    routes at the root. If the control plane already has a `keyhole` service, for example from an
@@ -126,7 +171,7 @@ install prints the next step.
 2. Run the same install again with the certificate:
 
    ```sh
-   sudo vbcdx install service keyhole-server --version 0.1.0-dev.2 \
+   sudo vbcdx install service keyhole-server --version 0.1.0-dev.12 \
      --service-cert /var/lib/vbcdx-control/default/keyhole.crt
    ```
 
@@ -178,7 +223,7 @@ its slug): the control plane asserts that id on every request, and Keyhole finds
 other. Keyhole's `docs/local-store.md`, "The org id", says how to read it.
 
 Every other Keyhole command takes the same prefix, and the
-keyhole repository documents them (at the tag you installed, e.g. `v0.1.0-dev.2`):
+keyhole repository documents them (at the tag you installed, e.g. `v0.1.0-dev.12`):
 
 - `load --file` and `keys put` (a stored key's value, on standard input): `docs/local-store.md`.
   `keys put` needs `--kek-file /var/lib/vbcdx-keyhole/default/kek`. Don't run `kek generate`:

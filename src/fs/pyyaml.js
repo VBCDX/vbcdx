@@ -91,7 +91,8 @@ function escapedString(value) {
     else if (c === 0x0a) out += BACKSLASH + "n";
     else if (c === 0x09) out += BACKSLASH + "t";
     else if (pyPrintable(c)) out += ch;
-    else out += BACKSLASH + (c <= 0xff ? "x" + hex(c, 2) : c <= 0xffff ? "u" + hex(c, 4) : "U" + hex(c, 8));
+    // Above U+FFFF pyPrintable admits every code point, so this needs at most four hex digits.
+    else out += BACKSLASH + (c <= 0xff ? "x" + hex(c, 2) : "u" + hex(c, 4));
   }
   return out + '"';
 }

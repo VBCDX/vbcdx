@@ -23,23 +23,50 @@ The commands here are written with `sudo`. In a root shell (a minimal Debian ima
 root and has no `sudo`), run them without the leading `sudo`; `runuser -u … --` works from a root
 shell as written.
 
-From the registry. `--version` names a version of `@vbcdx/sidecar`, the release that carries
-`vbcdx-control`; without it, the installer takes the `latest` dist-tag. The installer fetches it
-with root's `npm`, so root's npm config decides the registry: the public npm registry, or the
-`@vbcdx` scope's registry if root's config sets one (README, Install). See what is published, and
-which version each dist-tag points at, with:
+Both the installer (`@vbcdx/vbcdx`) and the sidecar release (`@vbcdx/sidecar`) come from the
+registry you install from. Until the public release that is the test registry, whose address comes
+from your operator; reading it needs no login, but npm has to be told. Set the `@vbcdx` scope's
+registry in the npm config of the user who runs vbcdx — root — as
+[Install](../README.md#install) does:
 
 ```sh
-npm view @vbcdx/sidecar versions dist-tags
+sudo npm config set @vbcdx:registry https://<registry>/
 ```
+
+Then install vbcdx for root, and check that it is the release with the service commands:
+
+```sh
+sudo npm install -g @vbcdx/vbcdx
+sudo vbcdx --version
+```
+
+Publishing to the public npm registry is a separate, explicitly approved release step
+(`scripts/release-publish.sh` refuses a public registry as the test registry). Until it happens,
+the public registry holds only an older vbcdx without the service commands, and no
+`@vbcdx/sidecar` at all; the scope line above is what makes this page work.
+
+`--version` names a version of `@vbcdx/sidecar`, the release that carries `vbcdx-control`; without
+it, the installer takes the `latest` dist-tag. The installer fetches it with root's `npm`, so it
+comes from the registry root's npm config names — the test registry, with the scope line set.
+See what is published there, and which version each dist-tag points at, with:
+
+```sh
+sudo npm view @vbcdx/sidecar versions dist-tags
+```
+
+If vbcdx is installed only for your own user (an nvm or a user npm prefix), `sudo vbcdx` stops with
+`sudo: vbcdx: command not found`: install it for root as above, or name the installer release
+explicitly with `sudo npx @vbcdx/vbcdx@<installer-version> install service control-plane …` (`npx`
+must be on root's PATH too, and needs the scope registry set as above, so it does not avoid that
+line). The service commands run as root either way.
 
 ```sh
 sudo vbcdx install service control-plane --version <version> --dry-run   # review the plan
 sudo vbcdx install service control-plane --version <version>
 ```
 
-With no registry access, install from a release tree you got another way (a CI artifact, or
-the release tarball unpacked). It is verified the same way before anything is written:
+With no registry access, install from a release tree you already verified — a CI artifact, or
+the release tarball unpacked. It is verified the same way before anything is written:
 
 ```sh
 mkdir rel && tar -xf vbcdx-sidecar-<version>.tar -C rel
@@ -86,6 +113,12 @@ listener speaks TLS 1.3 only, never plain HTTP. Apart from the one-time enrollme
 needs a valid enrollment token, it serves only sidecars that present the client certificate it
 issued at enrollment. Open that port on the host's firewall for your sidecars only.
 
+`--tunnel-name` is the only name on that certificate, so the host in a sidecar's `--control-plane`
+URL must be exactly that name. If sidecars have no DNS for it, give the IP as `--tunnel-name` and
+dial that IP. The pin authenticates the CA; it does not replace the name check. A sidecar that
+dials any other name does not enroll: the install fails with the certificate's name in the error
+and leaves nothing behind (step 3 of "Connect a sidecar" has the output).
+
 The tunnel's CA is made on first start (or with `tunnel init`). Its pin is what every sidecar
 needs:
 
@@ -111,6 +144,10 @@ sudo runuser -u vbcdx-control -- /usr/local/lib/vbcdx/control-plane/current/vbcd
    `vbcdx-control orgs create --name N [--owner EMAIL]`. Both run as the service user on the
    control host, over its admin socket; neither is reachable over the tunnel.
 
+   The token file is written as `vbcdx-control`, so it must be under a directory that user can
+   write: `/var/lib/vbcdx-control/<instance>/` as above, 0600. A path under `/root` is refused,
+   because `/root` is 0700 and the service user cannot enter it.
+
 2. Move the token file to the sidecar host over a channel you trust, then delete the control
    host's copy. On the sidecar host it must be a regular file, mode 0600, owned by the user who
    runs the install (root); the installer refuses anything else. Create it with a tight umask:
@@ -135,6 +172,16 @@ sudo runuser -u vbcdx-control -- /usr/local/lib/vbcdx/control-plane/current/vbcd
    the unit starts. It is never on a command line, in the plan, the install record or a log.
    `--enroll-token-stdin` reads it from stdin instead. A token is single use: delete the file.
 
+   The host in `--control-plane` must be the control plane's `--tunnel-name` exactly: it is the
+   only name on the certificate. With no DNS for that name, give the IP as `--tunnel-name` and
+   dial the IP; the pin does not replace the name check.
+
+   Dialling any other name fails the enroll rather than falling back: `vbcdx install` exits 6 and
+   prints `vbcdx-sidecar enroll exited 10; nothing was started`, then the TLS error naming the
+   certificate's name, `certificate is only valid for DnsName("cp.example.com")`. The run puts
+   back what it wrote, and the token is not spent — correct the host and run the same install
+   again.
+
 4. Check the tunnel:
 
    ```sh
@@ -143,20 +190,94 @@ sudo runuser -u vbcdx-control -- /usr/local/lib/vbcdx/control-plane/current/vbcd
                                            # the running daemon's own link, as the id on disk
    ```
 
-An already-enrolled sidecar refuses a second enrollment. To re-enroll one (for example, after
-it was revoked), run `vbcdx-sidecar enroll --force` with a new token yourself. On the control
-host, `vbcdx-control sidecars list` and `sidecars revoke ID --yes` manage enrolled sidecars.
+An already-enrolled sidecar refuses a second enrollment (exit 5, and the token is not spent). To
+re-enroll one — for example, after it was revoked — mint a new token with the same `--org` and
+`--name` as its first enrollment, move it over, and enroll by hand as the sidecar's user, with the
+token on stdin:
+
+```sh
+# On the control-plane host: a new one-time token for this sidecar.
+sudo runuser -u vbcdx-control -- /usr/local/lib/vbcdx/control-plane/current/vbcdx-control \
+  sidecars enroll-token --instance default --instance-dir /etc/vbcdx-control/default \
+  --org acme --name build-01 --ttl 1h --token-out /var/lib/vbcdx-control/default/build-01.token
+
+# Move it to the sidecar host, then delete the control host's copy.
+umask 077
+scp cp-host:/var/lib/vbcdx-control/default/build-01.token /root/build-01.token
+
+# On the sidecar host, as the sidecar's user.
+sudo runuser -u vbcdx -- /usr/local/lib/vbcdx/sidecar/current/vbcdx-sidecar \
+  enroll --instance default --instance-dir /etc/vbcdx/default --token-stdin --force \
+  < /root/build-01.token
+
+sudo vbcdx doctor --service sidecar
+```
+
+`--force` replaces the sidecar's identity, and the enrollment reports the old id as `replaced`.
+The running daemon picks up the new credential without a restart. `--token-stdin` keeps the token
+off the command line; `vbcdx-sidecar enroll --help` lists these arguments.
+
+On the control host, `vbcdx-control sidecars list` shows enrolled sidecars and
+`sidecars revoke ID --yes` revokes one. A revoke closes that sidecar's open link at once: every
+connection the revoked identity holds is re-checked and shut down, idle or not, with GOAWAY sent
+inside a 250 ms grace. `doctor --live` then shows the tunnel **down** (`check --live` exits 9,
+`tunnel is down`), not still connected. A daemon revoked this way does not reconnect on its own;
+it comes back only after a re-enrollment, above.
+
+## Sidecar on its own
+
+A sidecar needs no control plane: it serves its local sockets, and agents use it for local work
+([sidecar.md](sidecar.md)). Install it with no `--control-plane`:
+
+```sh
+sudo vbcdx install service sidecar --version <version>          # installs and starts it
+sudo vbcdx install service sidecar --version <version> --no-start   # enable, do not start
+```
+
+`--no-start` enables the unit without starting it; `vbcdx service sidecar start` starts it later.
+Before it has run, `vbcdx doctor --service sidecar` exits 5, and that is expected: the unit is
+inactive and both sockets are missing. The install itself prints `unit … (enabled, not started)`
+and says nothing about enrolling. Without `--no-start`, a sidecar given `--control-plane` but no
+enrollment token is refused (exit 2), the run puts back what it wrote, and the error names both
+choices: a token, or `--no-start` and enroll it by hand.
+
+A sidecar installed with `--control-plane` but no token adds the two tunnel checks to `doctor`,
+and they fail too until it is enrolled, because it has no credentials yet. Its unit will not stay
+up until then: the sidecar refuses to run with a control plane it is not enrolled with. Enroll it
+by hand as the sidecar's user, with the token on stdin (`vbcdx-sidecar enroll`, the form in
+"Connect a sidecar" above), then start it.
+
+Remove it with:
+
+```sh
+sudo vbcdx remove service sidecar --dry-run   # what would go, and what is kept
+sudo vbcdx remove service sidecar             # the unit, config and binaries; state stays
+sudo vbcdx remove service sidecar --wipe      # in place of the line above: also the state
+```
+
+Remove deletes what install wrote; a file you edited since is kept and named. The `vbcdx` user and
+group stay, and the config directory stays, empty unless a file was kept. The state directory is
+not emptied: without `--wipe` it keeps everything it held, including the sidecar's tunnel identity;
+`--wipe` deletes it. On an enrolled sidecar, revoke it on the control plane as well
+(`sidecars revoke ID --yes`, above).
 
 ## The first admin
 
 The control plane starts with no users. Create the first control admin once, as the service
-user, with the password on stdin (or `--password-file <0600 file>`). Never on the command line:
+user, with the password on stdin (or `--password-file <file>`, see below). Never on the command
+line:
 
 ```sh
 sudo runuser -u vbcdx-control -- /usr/local/lib/vbcdx/control-plane/current/vbcdx-control \
   bootstrap --instance default --instance-dir /etc/vbcdx-control/default \
   --email admin@example.com --name "Admin" --password-stdin --org acme
 ```
+
+With `--password-file`, the file must be readable by `vbcdx-control`, not only by root. A path
+under `/root` is refused (`permission denied`, exit 4) even when the file is owned by
+`vbcdx-control`, because `/root` is 0700 and the service user cannot enter it. Put the file under
+`/var/lib/vbcdx-control/<instance>/` (0600, owned by `vbcdx-control`), or keep a root-owned 0600
+file and pass it on stdin: `--password-stdin < file`.
 
 `--org NAME` (optional) also creates the first org, with this admin as its owner, in the same
 transaction. Sidecars are enrolled into an org, so a control plane that will take sidecars needs

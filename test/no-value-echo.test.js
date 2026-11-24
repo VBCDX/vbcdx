@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -326,3 +326,90 @@ test("redactTyped replaces each typed value that isn't name-shaped, and keeps th
   // A space-form value is redacted where it appears.
   assert.equal(redactTyped(`token file /home/u/${C} unreadable`, ["--enroll-token-file", `/home/u/${C}`]), "token file <argument 2> unreadable");
 });
+
+// The same rule for the inputs an earlier version took credentials from. None is read any more:
+// each is refused or reported by the name of the key, the field or the path, so a value in it (a
+// token, a file path inside a credentials map, a header, a file's content) never comes back.
+const FIXTURE_TOOL_DIR = join(ROOT, "test", "fixtures", "tool-package");
+
+for (const [value, core] of SHAPES) {
+  test(`no refusal or report about an old credential input echoes a value from it (${JSON.stringify(value)})`, () => {
+    const { home, run } = sandbox();
+    try {
+      // A value as it would sit in a JSON or env file; the path shapes are used as a file name's stem too.
+      const inJson = JSON.stringify(value).slice(1, -1);
+      const rows = [];
+      const row = (label, argv, { status, names, bin = "vbcdx.js" }) => rows.push({ label, argv, status, names, bin });
+      const cfgWith = (name, lines) => {
+        const p = join(home, name);
+        writeFileSync(p, `VBCDX_AGENTS_BASE_DIR=${home}/state\nVBCDX_AGENTS_CLAUDE_CONFIG_DIR=${home}/.claude\n${lines.join("\n")}\n`);
+        return p;
+      };
+
+      // N1: per-role credential keys in the configuration file.
+      const n1 = cfgWith("n1.env", [`VBCDX_AGENTS_USER_CODE_AGENT='${value}'`, `VBCDX_AGENTS_TOKEN_CODE_AGENT__FORGEJO='${value}'`, `VBCDX_AGENTS_PASSWORD_CODE_AGENT='${value}'`]);
+      const n1Names = ["VBCDX_AGENTS_USER_CODE_AGENT", "VBCDX_AGENTS_TOKEN_CODE_AGENT__FORGEJO", "VBCDX_AGENTS_PASSWORD_CODE_AGENT"];
+      row("N1 install agent", ["install", "agent", "code-agent", "--harness=claude", `--env=${n1}`, `--pack=${FIXTURE_PACK_DIR}`], { status: 2, names: n1Names });
+      row("N1 doctor", ["doctor", "--harness=claude", `--env=${n1}`], { status: 2, names: n1Names });
+      row("N1 init", ["init", "--harness=claude", `--env=${n1}`, `--pack=${FIXTURE_PACK_DIR}`, "--agents=code-agent"], { status: 2, names: n1Names, bin: "vbcdx-dev-agents.js" });
+
+      // N2: credential fields in the integrations file.
+      const side = join(home, "n2");
+      mkdirSync(side);
+      chmodSync(side, 0o755); // the file is read only from a directory others cannot write to, whatever the umask
+      const manifest = (service) => {
+        const p = join(side, `${service}.json`);
+        writeFileSync(p, JSON.stringify({ schema_version: 1, service, contract: "example.tracker/1", package_version: "1.0.0", tools: [] }));
+        return p;
+      };
+      const integ = join(side, "integrations.json");
+      writeFileSync(integ, `{"schema_version":1,"services":{` +
+        `"tracker":{"server_name":"tracker","manifest_file":${JSON.stringify(manifest("tracker"))},"credentials":{"code-agent":"/abs/${inJson}.env"},"headers":{"Authorization":"Bearer ${inJson}"}},` +
+        `"gateway":{"server_name":"gateway","manifest_file":${JSON.stringify(manifest("gateway"))},"transport":"http","url":"https://gw.example/${inJson.replace(/[^A-Za-z0-9-]/g, "")}","roles":["code-agent"],"allow_cleartext":true},` +
+        // Hermes git, which is not in this release: the value sits in the git host's address and in a role's mode.
+        `"carrier":{"server_name":"carrier","manifest_file":${JSON.stringify(manifest("carrier"))},"transport":"http","url":"https://gw.example/${inJson.replace(/[^A-Za-z0-9-]/g, "")}","roles":["code-agent"],` +
+        `"git_url":"https://git.example/${inJson}","git_roles":{"code-agent":"${inJson}"}}}}`);
+      chmodSync(integ, 0o600);
+      const n2 = cfgWith("n2.env", [`VBCDX_AGENTS_INTEGRATIONS_FILE=${integ}`]);
+      const n2Names = ["tracker.credentials", "tracker.headers", "gateway.allow_cleartext", "gateway.transport", "gateway.url", "gateway.roles",
+        "Hermes git isn't in this release", "carrier.transport", "carrier.url", "carrier.roles", "carrier.git_url", "carrier.git_roles"];
+      row("N2 install agent", ["install", "agent", "code-agent", "--harness=claude", `--env=${n2}`, `--pack=${FIXTURE_PACK_DIR}`], { status: 2, names: n2Names });
+      row("N2 init", ["init", "--harness=claude", `--env=${n2}`, `--pack=${FIXTURE_PACK_DIR}`, "--agents=code-agent"], { status: 2, names: n2Names, bin: "vbcdx-dev-agents.js" });
+
+      // N3: a tool package that asks for a key. The value sits where a declaration could carry one.
+      const pkg = join(home, "keyed-tool");
+      mkdirSync(join(pkg, "bin"), { recursive: true });
+      writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "@example/keyed-tool", version: "1.0.0", bin: { "keyed-tool": "bin/keyed-tool.js" } }));
+      writeFileSync(join(pkg, "bin", "keyed-tool.js"), "");
+      writeFileSync(join(pkg, "vbcdx.json"), `{"schema_version":1,"server_name":"keyed-tool","stdio":{"bin":"keyed-tool","args":["mcp"]},` +
+        `"env":[{"name":"KEYED_TOOL_TOKEN","description":"The token.","kind":"credential","required":true}],` +
+        `"credential_file":{"argument":"${inJson}"},"manifest":{"args":["manifest"]}}`);
+      row("N3 install tool", ["install", "tool", "./keyed-tool", "--harness=claude"], { status: 2, names: ["credential_file is no longer supported", 'env[0].kind is "credential"'] });
+
+      // N4: credential files left on disk. The value is the files' content.
+      const creds = join(home, ".vbcdx", "credentials");
+      mkdirSync(join(creds, "code-agent"), { recursive: true });
+      const left = [join(creds, "code-agent.env"), join(creds, "code-agent", "forgejo.env")];
+      for (const f of left) writeFileSync(f, `VBCDX_AGENTS_ROLE=${value}\nVBCDX_AGENTS_TOKEN=${value}\n`);
+      row("N4 doctor", ["doctor", "--harness=claude"], { status: 5, names: left });
+      row("N4 doctor --json", ["doctor", "--harness=claude", "--json"], { status: 5, names: left });
+      row("N4 install agent", ["install", "agent", "code-agent", "--harness=claude", `--pack=${FIXTURE_PACK_DIR}`, "--dry-run"], { status: 0, names: left });
+
+      const leaks = [];
+      for (const r of rows) {
+        const out = run(r.bin, r.argv);
+        const text = (out.stdout || "") + (out.stderr || "");
+        assert.equal(out.status, r.status, `${r.label}: ${text}`);
+        // The refusal does its job: it names every key, field or path there is to act on...
+        for (const name of r.names) assert.ok(text.includes(name), `${r.label} names ${name}: ${text}`);
+        // ...and nothing a value was made of.
+        if (text.includes(core)) leaks.push(`${r.label}: ${text.trim().split("\n").find((l) => l.includes(core))}`);
+      }
+      assert.deepEqual(leaks, []);
+      // The files an earlier version left were not touched by any of it.
+      for (const f of left) assert.equal(readFileSync(f, "utf8"), `VBCDX_AGENTS_ROLE=${value}\nVBCDX_AGENTS_TOKEN=${value}\n`);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+}

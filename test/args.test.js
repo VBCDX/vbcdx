@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { packSpecs, parseInitArgs } from "../src/cli/args.js";
+import { parseVbcdxArgs } from "../src/install/args.js";
 import { FIXTURE_IDS, PACK_ARG } from "./helpers/fixture-pack.js";
 
 test("requires --harness and --env", () => {
@@ -54,4 +55,14 @@ test("flags parse", () => {
   assert.equal(o.force, true);
   assert.equal(o.dryRun, true);
   assert.equal(o.quiet, true);
+});
+
+test("parseVbcdxArgs: --lock must be absolute, and --store goes with it", () => {
+  const base = ["install", "agent", "qa-agent", "--harness=claude"];
+  assert.throws(() => parseVbcdxArgs([...base, "--lock=rel/vbcdx.lock.json"]), /--lock must be an absolute path\.$/);
+  assert.throws(() => parseVbcdxArgs([...base, "--lock=/abs/vbcdx.lock.json", "--store=rel/store"]), /--store goes with --lock and must be an absolute path\.$/);
+  assert.throws(() => parseVbcdxArgs([...base, "--store=/abs/store"]), /--store goes with --lock and must be an absolute path\.$/);
+  const ok = parseVbcdxArgs([...base, "--lock=/abs/vbcdx.lock.json", "--store=/abs/store"]);
+  assert.equal(ok.lock, "/abs/vbcdx.lock.json");
+  assert.equal(ok.store, "/abs/store");
 });

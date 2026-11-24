@@ -16,6 +16,11 @@ import { renderClaude } from "../src/renderers/claude.js";
 import { renderOpencode } from "../src/renderers/opencode.js";
 import { FIXTURE_IDS, PACK_ARG } from "./helpers/fixture-pack.js";
 
+// The integrations file is read only if no one but its owner can change it (and its
+// directory too), and these tests write theirs with the default mode. Pin the umask a
+// CI runner has, so a host whose umask is 002 (user private groups) runs them the same.
+process.umask(0o022);
+
 const cfg = (obj) => new Map(Object.entries(obj));
 const files = (out) => Object.fromEntries(out.files.map((f) => [f.name, f.content]));
 const routing = { baseUrl: "https://llm.example/v1", model: "qwen3-14b", roleModels: { "code-agent": "qwen3-coder" } };
@@ -153,21 +158,21 @@ test("model routing renders a named custom provider with key_env and never a key
   assert.equal(bare.custom_providers, undefined);
 });
 
-test("bound service credentials land in SOUL.md, only for mapped roles", () => {
+test("the bound-tools note lands in SOUL.md, only for listed roles, and names no credential", () => {
   const stdio = { command: "vbcdx-forgejo", args: ["mcp"], env: {} };
-  const integrations = { services: { forgejo: { serverName: "forgejo", tools: ["whoami", "create_comment", "merge_pull_request"], credentials: { "code-agent": "/abs/creds/code-agent.env" }, stdio } } };
+  const integrations = { services: { forgejo: { serverName: "forgejo", tools: ["whoami", "create_comment", "merge_pull_request"], roles: ["code-agent"], stdio } } };
   const soul = files(renderHermes(getRole("code-agent"), { integrations }))["SOUL.md"];
-  assert.match(soul, /credential_file="\/abs\/creds\/code-agent.env"/);
-  assert.match(soul, /whoami/);
+  assert.match(soul, /## Bound service tools\n\n- `forgejo`: tools available to your role: create_comment, whoami\.\n/);
   assert.doesNotMatch(soul, /merge_pull_request/); // not in code-agent's allowlist
-  assert.doesNotMatch(files(renderHermes(getRole("pm-agent"), { integrations }))["SOUL.md"], /Bound service credentials/);
+  assert.doesNotMatch(soul, /credential/);
+  assert.doesNotMatch(files(renderHermes(getRole("pm-agent"), { integrations }))["SOUL.md"], /Bound service/);
 });
 
 test("bound roles get the service's declared stdio launch, with an include list of exactly the bound tools", () => {
   const launch = (name) => ({ command: `vbcdx-${name}`, args: ["mcp"], env: { [`VBCDX_${name.toUpperCase()}_URL`]: `\${VBCDX_${name.toUpperCase()}_URL}`, [`VBCDX_${name.toUpperCase()}_WRITES`]: `\${VBCDX_${name.toUpperCase()}_WRITES}` } });
   const integrations = { services: {
-    forgejo: { serverName: "forgejo", contract: "vbcdx.forgejo/1", tools: ["whoami", "create_comment", "merge_pull_request"], credentials: { "code-agent": "/abs/creds/code-agent.env" }, stdio: launch("forgejo") },
-    coolify: { serverName: "coolify", contract: "vbcdx.coolify/1", tools: ["health", "deploy"], credentials: { "devops-agent": "/abs/creds/devops-agent.env" }, stdio: launch("coolify") },
+    forgejo: { serverName: "forgejo", contract: "vbcdx.forgejo/1", tools: ["whoami", "create_comment", "merge_pull_request"], roles: ["code-agent"], stdio: launch("forgejo") },
+    coolify: { serverName: "coolify", contract: "vbcdx.coolify/1", tools: ["health", "deploy"], roles: ["devops-agent"], stdio: launch("coolify") },
   } };
   const code = yamlParse(files(renderHermes(getRole("code-agent"), { integrations }))["config.yaml"]);
   assert.deepEqual(Object.keys(code.mcp_servers), ["forgejo"]); // code-agent has no coolify allowlist
@@ -178,16 +183,16 @@ test("bound roles get the service's declared stdio launch, with an include list 
   });
   const devops = yamlParse(files(renderHermes(getRole("devops-agent"), { integrations }))["config.yaml"]);
   assert.deepEqual(devops.mcp_servers.coolify.tools.include, ["deploy", "health"]);
-  assert.equal(devops.mcp_servers.forgejo, undefined); // no forgejo credential mapping for devops-agent
+  assert.equal(devops.mcp_servers.forgejo, undefined); // devops-agent is not in forgejo's roles
   const pm = yamlParse(files(renderHermes(getRole("pm-agent"), { integrations }))["config.yaml"]);
   assert.equal(pm.mcp_servers, undefined); // unmapped role: nothing bound, nothing rendered
   const raw = files(renderHermes(getRole("code-agent"), { integrations }))["config.yaml"];
-  assert.doesNotMatch(raw, /credential_file|\/abs\/creds/); // the credential path lives in SOUL.md only
+  assert.doesNotMatch(raw, /credential|headers|url:|Bearer/); // a stdio launch and nothing else
 });
 
 test("a bound stdio service with no launch is refused, the same for every contract", () => {
   for (const contract of ["vbcdx.forgejo/1", "vbcdx.coolify/1", "acme.forge/1"]) {
-    const integrations = { services: { forgejo: { serverName: "forgejo", contract, tools: ["whoami"], credentials: { "code-agent": "/abs/creds/code-agent.env" } } } };
+    const integrations = { services: { forgejo: { serverName: "forgejo", contract, tools: ["whoami"], roles: ["code-agent"] } } };
     assert.throws(() => renderHermes(getRole("code-agent"), { integrations }), (err) => {
       assert.equal(err.code, EXIT.CONFIG, contract);
       assert.match(err.message, /Service forgejo is a stdio service bound to a role, but nothing says how to start it/, contract);
@@ -234,7 +239,7 @@ test("planner writes one profile directory per role under HERMES_HOME/profiles",
   assert.ok(plan.warnings.some((w) => /No Hermes model routing/.test(w)));
 });
 
-// ── transport "http" (companion network mode, e.g. through an MCP gateway) ─────
+// ── transport "http": refused ───────────────────────────────────────────────
 
 const tmpDirs = [];
 after(() => { for (const d of tmpDirs) rmSync(d, { recursive: true, force: true }); });
@@ -251,89 +256,59 @@ function writeIntegrations(service) {
   return file;
 }
 
-test("integrations: http transport takes url + roles, never credentials", () => {
-  const ok = loadIntegrations(writeIntegrations({ transport: "http", url: "https://gw.example/mcp/Forgejo", roles: ["code-agent"] }));
-  assert.equal(ok.services.forgejo.transport, "http");
-  assert.equal(ok.services.forgejo.url, "https://gw.example/mcp/Forgejo");
-  assert.deepEqual(ok.services.forgejo.roles, ["code-agent"]);
-  assert.deepEqual(ok.services.forgejo.credentials, {});
-  const stdio = loadIntegrations(writeIntegrations({ credentials: { "code-agent": "/abs/c.env" } }));
-  assert.equal(stdio.services.forgejo.transport, "stdio"); // default unchanged
-  const bad = (svc, re) => assert.throws(() => loadIntegrations(writeIntegrations(svc)), re);
-  bad({ transport: "http", url: "https://gw.example/mcp", roles: ["code-agent"], credentials: {} }, /roles list, not credentials/);
-  bad({ transport: "http", roles: ["code-agent"] }, /requires a url/);
-  bad({ transport: "http", url: "https://u:p@gw.example/mcp", roles: ["code-agent"] }, /embed credentials/);
-  bad({ transport: "http", url: "https://gw.example/mcp" }, /requires a roles array/);
-  bad({ transport: "http", url: "https://gw.example/mcp", roles: ["not-a-role"] }, /not a role of a loaded agent pack/);
-  bad({ transport: "http", url: "https://gw.example/mcp", roles: ["code-agent", "code-agent"] }, /twice/);
-  bad({ transport: "ws" }, /"stdio" or "http"/);
-  bad({ url: "https://gw.example/mcp" }, /only valid with transport "http"/);
-});
+// An http service was reached with a role's bearer token, or carried Hermes git. Neither is
+// accepted: what an earlier version loaded as the git carrier is refused like any other.
+const HTTP = { transport: "http", url: "https://gw.example/mcp/Forgejo" };
+const CARRIER = { ...HTTP, git_url: "https://git.example" };
 
-test("http-bound roles get url + per-profile bearer header, and a no-credential_file note", () => {
-  const integrations = loadIntegrations(writeIntegrations({ transport: "http", url: "https://gw.example/mcp/Forgejo", roles: ["code-agent", "pm-agent"] }));
-  const out = files(renderHermes(getRole("code-agent"), { integrations }));
-  const conf = yamlParse(out["config.yaml"]);
-  assert.deepEqual(conf.mcp_servers.forgejo, {
-    url: "https://gw.example/mcp/Forgejo",
-    headers: { Authorization: "Bearer ${VBCDX_FORGEJO_TOKEN}" },
-    tools: { include: ["create_comment", "whoami"], prompts: false, resources: false },
+test("integrations: an http service is refused, with or without git_url, and never takes credentials", () => {
+  const stdio = loadIntegrations(writeIntegrations({})).services.forgejo;
+  assert.deepEqual(stdio.roles, [], "the file binds no role");
+  for (const gone of ["transport", "url", "toolPrefix", "gitUrl", "gitRoles", "credentials"]) assert.equal(gone in stdio, false, gone);
+  const bad = (svc, re) => assert.throws(() => loadIntegrations(writeIntegrations(svc)), (err) => {
+    assert.equal(err.code, EXIT.CONFIG);
+    assert.match(err.message, re);
+    return true;
   });
-  assert.doesNotMatch(out["config.yaml"], /command:|credential_file/);
-  assert.match(out["SOUL.md"], /identity is supplied by the connection; call forgejo tools without a credential_file argument/);
-  assert.doesNotMatch(out["SOUL.md"], /credential_file="/);
-  // pm-agent's allowlist includes merge_pull_request (destructive) -> bound, but only because it is in its reviewed allowlist
-  const pm = yamlParse(files(renderHermes(getRole("pm-agent"), { integrations }))["config.yaml"]);
-  assert.ok(pm.mcp_servers.forgejo.tools.include.includes("merge_pull_request"));
-  // a role not listed gets nothing
-  assert.equal(yamlParse(files(renderHermes(getRole("adversarial-auditor"), { integrations }))["config.yaml"]).mcp_servers, undefined);
+  bad({ ...HTTP, roles: ["code-agent"] }, /per-role credentials are no longer read or sent; remove these fields: forgejo\.transport, forgejo\.url, forgejo\.roles\./);
+  bad({ ...CARRIER, roles: ["code-agent"] }, /Hermes git isn't in this release; remove these fields: forgejo\.transport, forgejo\.url, forgejo\.roles, forgejo\.git_url\./);
+  bad({ ...CARRIER, roles: ["code-agent"], credentials: {} }, /remove these fields: forgejo\.credentials\./);
+  bad({ credentials: { "code-agent": "/abs/c.env" } }, /remove these fields: forgejo\.credentials\./);
+  // What an earlier version checked inside an http service is no longer looked at: the
+  // fields are refused by name whatever they hold.
+  for (const svc of [
+    { ...HTTP }, { ...HTTP, url: undefined, roles: ["code-agent"] }, { ...HTTP, url: "https://u:p@gw.example/mcp", roles: ["code-agent"] },
+    { ...HTTP, roles: ["not-a-role"] }, { ...HTTP, roles: ["code-agent", "code-agent"] },
+    { ...HTTP, roles: ["code-agent"], tool_prefix: "bad prefix" },
+  ]) bad(svc, /per-role credentials are no longer read or sent; remove these fields: forgejo\.transport/);
+  bad({ url: "https://gw.example/mcp" }, /remove these fields: forgejo\.url\./);
+  bad({ tool_prefix: "Forgejo-" }, /remove these fields: forgejo\.tool_prefix\./);
+  bad({ transport: "ws" }, /transport must be "stdio"\./);
 });
 
-test("http tool_prefix: the include list uses the gateway's names, the note keeps the plain ones", () => {
-  const integrations = loadIntegrations(writeIntegrations({ transport: "http", url: "https://gw.example/mcp/Forgejo", tool_prefix: "Forgejo-", roles: ["code-agent"] }));
-  const out = files(renderHermes(getRole("code-agent"), { integrations }));
-  assert.deepEqual(yamlParse(out["config.yaml"]).mcp_servers.forgejo.tools.include, ["Forgejo-create_comment", "Forgejo-whoami"]);
-  assert.match(out["SOUL.md"], /Tools available to your role: create_comment, whoami\./);
-  assert.throws(() => loadIntegrations(writeIntegrations({ transport: "http", url: "https://gw.example/mcp", roles: ["code-agent"], tool_prefix: "bad prefix" })), /tool_prefix must be/);
-  assert.throws(() => loadIntegrations(writeIntegrations({ transport: "http", url: "https://gw.example/mcp", roles: ["code-agent"], tool_prefix: "Forgejo." })), /tool_prefix must be/);
-  assert.throws(() => loadIntegrations(writeIntegrations({ credentials: {}, tool_prefix: "Forgejo-" })), /only valid with transport "http"/);
-});
-
-test("tool_prefix also applies to Claude and OpenCode tool IDs (same gateway, same names)", () => {
-  const integrations = loadIntegrations(writeIntegrations({ transport: "http", url: "https://gw.example/mcp/Forgejo", tool_prefix: "Forgejo-", roles: ["code-agent"] }));
+test("tool ids are the manifest's names: nothing prefixes them, for any harness", () => {
+  const integrations = { services: { forgejo: { serverName: "forgejo", contract: "vbcdx.forgejo/1", tools: ["create_comment", "whoami"], roles: ["code-agent"],
+    toolPrefix: "Forgejo-", stdio: { command: "x", args: [], env: {} } } } };
   const claude = renderClaude(getRole("code-agent"), { integrations }).content;
-  assert.match(claude, /mcp__forgejo__Forgejo-whoami/);
-  assert.doesNotMatch(claude, /mcp__forgejo__whoami/);
+  assert.match(claude, /mcp__forgejo__whoami/);
+  assert.doesNotMatch(claude, /Forgejo-/);
   const opencode = renderOpencode(getRole("code-agent"), { integrations }).content;
-  assert.match(opencode, /forgejo_Forgejo-whoami/);
-  // stdio (no prefix) is unchanged
-  const plain = loadIntegrations(writeIntegrations({ credentials: { "code-agent": "/abs/c.env" } }));
-  assert.match(renderClaude(getRole("code-agent"), { integrations: plain }).content, /mcp__forgejo__whoami/);
+  assert.match(opencode, /forgejo_whoami/);
+  assert.doesNotMatch(opencode, /Forgejo-/);
+  const conf = yamlParse(files(renderHermes(getRole("code-agent"), { integrations }))["config.yaml"]);
+  assert.deepEqual(conf.mcp_servers.forgejo.tools.include, ["create_comment", "whoami"]);
 });
 
-test("plain http off-host needs allow_cleartext; init then warns", () => {
-  const svc = (url, extra = {}) => ({ transport: "http", url, roles: ["code-agent"], ...extra });
-  // rejected without the opt-in
-  for (const url of ["http://forgejo-mcp:8080/mcp", "http://gw.example/mcp", "http://10.0.0.5/mcp", "http://127.evil.example/mcp", "http://127.0.0.1.nip.io/mcp"]) {
-    assert.throws(() => loadIntegrations(writeIntegrations(svc(url))), /allow_cleartext/, url);
-    assert.throws(() => loadIntegrations(writeIntegrations(svc(url, { allow_cleartext: false }))), /allow_cleartext/, url);
+test("allow_cleartext is gone: no bearer token is sent anywhere, so there is nothing to opt in to and nothing to warn about", () => {
+  for (const value of [true, false, "yes"]) {
+    assert.throws(() => loadIntegrations(writeIntegrations({ ...HTTP, url: "http://gw.example/mcp", roles: ["code-agent"], allow_cleartext: value })), /remove these fields: forgejo\.allow_cleartext, forgejo\.transport, forgejo\.url, forgejo\.roles\./);
+    assert.throws(() => loadIntegrations(writeIntegrations({ allow_cleartext: value })), /remove these fields: forgejo\.allow_cleartext\./);
   }
-  // https and loopback need no opt-in
-  for (const url of ["https://gw.example/mcp", "http://127.0.0.1:8080/mcp", "http://127.1/mcp", "http://[::1]:8080/mcp", "http://localhost:8080/mcp"]) {
-    assert.equal(loadIntegrations(writeIntegrations(svc(url))).services.forgejo.url, url);
-  }
-  assert.throws(() => loadIntegrations(writeIntegrations(svc("http://gw.example/mcp", { allow_cleartext: "yes" }))), /true or false/);
-  assert.throws(() => loadIntegrations(writeIntegrations({ credentials: {}, allow_cleartext: true })), /only valid with transport "http"/);
-  const warn = (service) => {
-    const file = writeIntegrations(service);
-    const args = parseInitArgs(["--harness=hermes", "--env=/c", "--agents=code-agent", "--dry-run"]);
-    const entries = cfg({ VBCDX_AGENTS_BASE_DIR: "/b", VBCDX_AGENTS_CREDENTIALS_DIR: "/c", VBCDX_AGENTS_HERMES_HOME: "/h", VBCDX_AGENTS_INTEGRATIONS_FILE: file });
-    return buildPlan(args, entries, { cwd: "/" }).warnings.filter((w) => /cleartext/.test(w));
-  };
-  // with the opt-in: accepted, and init still warns
-  assert.match(warn(svc("http://forgejo-mcp:8080/mcp", { allow_cleartext: true }))[0], /cleartext to forgejo-mcp:8080/);
-  assert.deepEqual(warn(svc("https://gw.example/mcp")), []);
-  assert.deepEqual(warn(svc("http://127.0.0.1:8080/mcp")), []);
+  // A file with nothing refused in it plans without a warning about any service.
+  const file = writeIntegrations({});
+  const args = parseInitArgs(["--harness=hermes", "--env=/c", "--agents=code-agent", "--dry-run"]);
+  const entries = cfg({ VBCDX_AGENTS_BASE_DIR: "/b", VBCDX_AGENTS_HERMES_HOME: "/h", VBCDX_AGENTS_INTEGRATIONS_FILE: file });
+  assert.deepEqual(buildPlan(args, entries, { cwd: "/" }).warnings.filter((w) => !/^No Hermes /.test(w)), []);
 });
 
 // A plugin toolset is switched on for every platform, pinned ones included, unless

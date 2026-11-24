@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "name": "keyhole",
+  "sidecar_prefix": null,
+  "routes": [
+    {
+      "op": "keyhole.resolve",
+      "method": "POST",
+      "path": "orgs/{org}/resolve",
+      "agent": false
+    },
+    {
+      "op": "keyhole.granted-tools",
+      "method": "POST",
+      "path": "orgs/{org}/granted-tools",
+      "agent": false
+    }
+  ]
+}

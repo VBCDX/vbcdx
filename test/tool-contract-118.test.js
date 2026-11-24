@@ -9,16 +9,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FIXTURE_PACK_DIR } from "./helpers/fixture-pack.js";
 import { readPack } from "../src/packs/load.js";
-import { loadIntegrations, FORGEJO_CONTRACT } from "../src/config/integrations.js";
+import { loadIntegrations } from "../src/config/integrations.js";
 import { boundServiceTools } from "../src/renderers/native.js";
-import { renderHermes, renderHermesMcpServers, hermesServiceTokenEnv, hermesHttpTokenEnv, hermesGit } from "../src/renderers/hermes.js";
-import { buildPlan } from "../src/planner.js";
-import { parseInitArgs } from "../src/cli/args.js";
-import { parseEnvFile } from "../src/config/env-parser.js";
 import { buildAgentCard } from "../src/a2a/card.js";
 import { getRole } from "../src/roles/index.js";
-import { EXIT } from "../src/errors.js";
 import { installedToolBindings } from "../src/install/commands.js";
+
+// The integrations file is read only if no one but its owner can change it (and its
+// directory too), and these tests write theirs with the default mode. Pin the umask a
+// CI runner has, so a host whose umask is 002 (user private groups) runs them the same.
+process.umask(0o022);
+
+// A contract a pack may name. Nothing in the installer treats it differently from any other.
+const FORGEJO_CONTRACT = "vbcdx.forgejo/1";
 
 const roots = [];
 const scratch = () => { const d = mkdtempSync(join(tmpdir(), "vbcdx-contract-")); roots.push(d); return d; };
@@ -41,20 +44,29 @@ function writeIntegrations(dir, services) {
 
 const descriptor = (id, remote) => ({ id, remote_capabilities: remote });
 
+// Bindings as `vbcdx install tool` records them: the only way a role is bound to a tool. (The
+// integrations file binds none: it carries no roles list for a tool, and no credentials map.)
+function installed(services, roleIds = ["code-agent"]) {
+  const ctx = { harness: "claude", scope: "user", config: { harnessRoot: "/h" } };
+  const tools = Object.fromEntries(Object.entries(services).map(([name, { contract, tools: names }]) => [
+    `claude:user:/h:${name}`, { server_name: name, contract, tools: [...names].sort(), launch: { command: "x", args: [] }, env: [] },
+  ]));
+  return installedToolBindings(ctx, { tools }, roleIds);
+}
+
 test("a third-party service loads under any well-formed name and keeps its contract", () => {
   const d = scratch();
   const res = loadIntegrations(writeIntegrations(d, {
-    tracker: { contract: "example.tracker/1", tools: ["list_tickets", "close_ticket"], transport: "http", url: "https://tracker.example/mcp", roles: ["code-agent"] },
+    tracker: { contract: "example.tracker/1", tools: ["list_tickets", "close_ticket"] },
   }));
   assert.equal(res.services.tracker.contract, "example.tracker/1");
   assert.deepEqual(res.services.tracker.tools, ["close_ticket", "list_tickets"]);
+  // ...and the file binds no role to it, whatever the role's allowlist says.
+  assert.deepEqual(boundServiceTools(descriptor("code-agent", { "example.tracker/1": ["list_tickets"] }), res), []);
 });
 
 test("a role allows tools by contract: the server name doesn't matter", () => {
-  const d = scratch();
-  const integ = loadIntegrations(writeIntegrations(d, {
-    git: { contract: FORGEJO_CONTRACT, tools: ["whoami", "create_comment", "merge_pull_request"], transport: "http", url: "https://mcp.example/forgejo", roles: ["code-agent"] },
-  }));
+  const integ = installed({ git: { contract: FORGEJO_CONTRACT, tools: ["whoami", "create_comment", "merge_pull_request"] } });
   const role = descriptor("code-agent", { [FORGEJO_CONTRACT]: ["whoami", "create_comment"] });
   const [b] = boundServiceTools(role, integ);
   assert.equal(b.server, "git");
@@ -63,77 +75,14 @@ test("a role allows tools by contract: the server name doesn't matter", () => {
 });
 
 test("a descriptor keyed by server name still binds that server (packs before contracts)", () => {
-  const d = scratch();
-  const integ = loadIntegrations(writeIntegrations(d, {
-    forgejo: { contract: FORGEJO_CONTRACT, tools: ["whoami"], transport: "http", url: "https://mcp.example/forgejo", roles: ["code-agent"] },
-  }));
+  const integ = installed({ forgejo: { contract: FORGEJO_CONTRACT, tools: ["whoami"] } });
   assert.deepEqual(boundServiceTools(descriptor("code-agent", { forgejo: ["whoami"] }), integ).map((b) => b.server), ["forgejo"]);
 });
 
 test("an unknown contract binds to no role, even one listing the same tool names under another contract", () => {
-  const d = scratch();
-  const integ = loadIntegrations(writeIntegrations(d, {
-    tracker: { contract: "example.tracker/1", tools: ["whoami"], transport: "http", url: "https://tracker.example/mcp", roles: ["code-agent"] },
-  }));
+  const integ = installed({ tracker: { contract: "example.tracker/1", tools: ["whoami"] } });
   assert.deepEqual(boundServiceTools(descriptor("code-agent", { [FORGEJO_CONTRACT]: ["whoami"] }), integ), []);
   assert.equal(boundServiceTools(descriptor("code-agent", { "example.tracker/1": ["whoami"] }), integ).length, 1);
-});
-
-test("an http tool's bearer header comes from VBCDX_<SERVER>_TOKEN, so the bundled names are unchanged", () => {
-  assert.equal(hermesHttpTokenEnv("forgejo"), "VBCDX_FORGEJO_TOKEN");
-  assert.equal(hermesHttpTokenEnv("coolify"), "VBCDX_COOLIFY_TOKEN");
-  assert.equal(hermesHttpTokenEnv("my-tracker"), "VBCDX_MY_TRACKER_TOKEN");
-  const servers = renderHermesMcpServers([
-    { server: "my-tracker", contract: "example.tracker/1", transport: "http", url: "https://t.example/mcp", toolPrefix: "", tools: ["list"] },
-  ]);
-  assert.deepEqual(servers["my-tracker"].headers, { Authorization: "Bearer ${VBCDX_MY_TRACKER_TOKEN}" });
-});
-
-test("git_url follows the Forgejo contract, not the name forgejo", () => {
-  const d = scratch();
-  const ok = loadIntegrations(writeIntegrations(d, {
-    git: { contract: FORGEJO_CONTRACT, tools: ["whoami"], transport: "http", url: "https://mcp.example/forgejo", roles: ["code-agent"], git_url: "https://git.example", git_roles: { "code-agent": "fork" } },
-  }));
-  assert.equal(ok.services.git.gitUrl, "https://git.example");
-  const role = descriptor("code-agent", { [FORGEJO_CONTRACT]: ["whoami"] });
-  const g = hermesGit(boundServiceTools(role, ok));
-  assert.equal(g.tokenEnv, "VBCDX_GIT_TOKEN"); // the fork token is the binding's own key
-  // The rendered helper pushes with that key, not the one a service named "forgejo" gets.
-  const base = getRole("code-agent");
-  const rendered = renderHermes({ ...base, descriptor: { ...base.descriptor, remote_capabilities: { [FORGEJO_CONTRACT]: ["whoami"] } } }, { integrations: ok });
-  const helper = rendered.files.find((f) => f.name === "bin/hermes-git");
-  assert.ok(helper, "a fork-mode Forgejo binding renders bin/hermes-git");
-  assert.match(helper.content, /VBCDX_GIT_TOKEN/);
-  assert.doesNotMatch(helper.content, /VBCDX_FORGEJO_TOKEN/);
-  const d2 = scratch();
-  assert.throws(() => loadIntegrations(writeIntegrations(d2, {
-    forgejo: { contract: "example.tracker/1", tools: ["whoami"], transport: "http", url: "https://t.example/mcp", roles: ["code-agent"], git_url: "https://git.example" },
-  })), /git_url is only valid for a vbcdx\.forgejo\/1 service/);
-  // A read role's token is the read-scoped key, whatever the service is called.
-  assert.equal(hermesServiceTokenEnv({ server: "git", contract: FORGEJO_CONTRACT, gitMode: "read" }), "VBCDX_FORGEJO_GIT_TOKEN");
-});
-
-test("an external credential file needs USER for the Forgejo contract and only TOKEN for any other", () => {
-  const d = scratch();
-  const creds = join(d, "creds");
-  const tokenOnly = join(d, "code-agent.env");
-  writeFileSync(tokenOnly, 'VBCDX_AGENTS_ROLE="code-agent"\nVBCDX_AGENTS_TOKEN="t"\n');
-  const cfgFor = (integ) => {
-    const cfg = join(d, `cfg-${roots.length}-${Math.random().toString(36).slice(2)}.env`);
-    writeFileSync(cfg, [`VBCDX_AGENTS_BASE_DIR=${d}/state`, `VBCDX_AGENTS_CREDENTIALS_DIR=${creds}`,
-      `VBCDX_AGENTS_CLAUDE_CONFIG_DIR=${d}/claude`, `VBCDX_AGENTS_INTEGRATIONS_FILE=${integ}`, ""].join("\n"));
-    return cfg;
-  };
-  const plan = (integ) => { const cfg = cfgFor(integ); return buildPlan(parseInitArgs(["--harness=claude", "--env=" + cfg, "--agents=code-agent"]), parseEnvFile(cfg)); };
-  const other = writeIntegrations(join(d), { tracker: { contract: "example.tracker/1", tools: ["list"], credentials: { "code-agent": tokenOnly } } });
-  assert.ok(plan(other), "a token-only file satisfies a non-Forgejo contract");
-  const d2 = scratch();
-  const forgejo = writeIntegrations(d2, { forgejo: { contract: FORGEJO_CONTRACT, tools: ["whoami"], credentials: { "code-agent": tokenOnly } } });
-  assert.throws(() => plan(forgejo), (err) => {
-    assert.equal(err.code, EXIT.CREDENTIAL, err.message);
-    assert.match(err.message, /credential_key_missing/);
-    return true;
-  });
 });
 
 test("an agent card tags a contract-keyed role the same as a name-keyed one", () => {
@@ -145,8 +94,8 @@ test("an agent card tags a contract-keyed role the same as a name-keyed one", ()
 });
 
 test("a tool installed with `vbcdx install tool` binds by the contract its manifest reported", () => {
-  const ctx = { harness: "claude", scope: "user", config: { harnessRoot: "/h", credentialsDir: "/c" } };
-  const record = (server_name, contract) => ({ server_name, contract, tools: ["list"], credential_file: null, launch: { command: "x", args: [] }, env: [] });
+  const ctx = { harness: "claude", scope: "user", config: { harnessRoot: "/h" } };
+  const record = (server_name, contract) => ({ server_name, contract, tools: ["list"], launch: { command: "x", args: [] }, env: [] });
   const manifest = { tools: { "claude:user:/h:tracker": record("tracker", "example.tracker/1"), "claude:user:/h:legacy": record("legacy", undefined) } };
   const integ = installedToolBindings(ctx, manifest, ["code-agent"]);
   assert.equal(integ.services.tracker.contract, "example.tracker/1");
@@ -156,7 +105,7 @@ test("a tool installed with `vbcdx install tool` binds by the contract its manif
   assert.deepEqual(boundServiceTools(descriptor("code-agent", { [FORGEJO_CONTRACT]: ["list"] }), integ), []);
 });
 
-// ── A pack can declare contract keys; own keys only; reserved token keys ──
+// ── A pack can declare contract keys; own keys only ──
 
 function packWithCodeAgentRemote(remote, { contracts } = {}) {
   const dir = join(scratch(), "pack");
@@ -174,10 +123,7 @@ function packWithCodeAgentRemote(remote, { contracts } = {}) {
 test("a pack's role.json may key remote_capabilities by contract, and readPack's role binds by it", () => {
   const pack = readPack(packWithCodeAgentRemote({ [FORGEJO_CONTRACT]: ["whoami", "create_comment"] }));
   const role = pack.roles.find((r) => r.id === "code-agent");
-  const d = scratch();
-  const integ = loadIntegrations(writeIntegrations(d, {
-    git: { contract: FORGEJO_CONTRACT, tools: ["whoami", "create_comment", "merge_pull_request"], transport: "http", url: "https://mcp.example/forgejo", roles: ["code-agent"] },
-  }));
+  const integ = installed({ git: { contract: FORGEJO_CONTRACT, tools: ["whoami", "create_comment", "merge_pull_request"] } });
   const [b] = boundServiceTools(role.descriptor, integ);
   assert.equal(b.server, "git");
   assert.deepEqual(b.tools, ["create_comment", "whoami"]);
@@ -193,24 +139,12 @@ test("a contract key must be well formed and listed in the pack's contracts", ()
 });
 
 test("a service called constructor binds nothing it isn't granted and tags nothing", () => {
-  const d = scratch();
-  const integ = loadIntegrations(writeIntegrations(d, {
-    constructor: { contract: "example.tracker/1", tools: ["list"], transport: "http", url: "https://t.example/mcp", roles: ["code-agent"] },
-  }));
+  // The name is accepted in the integrations file too.
+  assert.equal(loadIntegrations(writeIntegrations(scratch(), { constructor: { contract: "example.tracker/1", tools: ["list"] } })).services.constructor.contract, "example.tracker/1");
+  const integ = installed({ constructor: { contract: "example.tracker/1", tools: ["list"] } });
   assert.deepEqual(boundServiceTools(descriptor("code-agent", { [FORGEJO_CONTRACT]: ["whoami"] }), integ), []);
   assert.deepEqual(boundServiceTools(descriptor("code-agent", { constructor: ["list"] }), integ).map((b) => b.tools), [["list"]]);
   const role = getRole("code-agent");
   const card = buildAgentCard({ ...role, descriptor: { ...role.descriptor, remote_capabilities: { constructor: ["list"] } } }, { baseUrl: "https://agents.example" });
   assert.ok(card.skills[0].tags.every((t) => typeof t === "string"));
-});
-
-test("a service name whose token key is taken is refused", () => {
-  for (const name of ["forgejo-git", "agents"]) {
-    const d = scratch();
-    assert.throws(() => loadIntegrations(writeIntegrations(d, {
-      [name]: { contract: "example.tracker/1", tools: ["list"], transport: "http", url: "https://t.example/mcp", roles: ["code-agent"] },
-    })), new RegExp(`Service name "${name}" in integrations file is reserved`), name);
-  }
-  // A near name is fine and gets its own key.
-  assert.equal(hermesHttpTokenEnv("forgejo-git2"), "VBCDX_FORGEJO_GIT2_TOKEN");
 });

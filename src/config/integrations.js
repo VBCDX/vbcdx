@@ -1,9 +1,11 @@
 // Explicit service bindings and portable manifest validation (spec 6.1).
 //
 // The optional VBCDX_AGENTS_INTEGRATIONS_FILE names one absolute, nonsecret
-// JSON file describing which services are bound, where each service's exported
-// manifest lives, and each role's explicit credential-file path. This module
-// validates that file and the referenced manifests strictly and offline: it
+// JSON file listing services by name and where each service's exported manifest lives.
+// It carries no credential and names none: a per-role credential-file map, a headers
+// field, an http service (it was reached with a role's bearer token) and the git fields
+// are refused by name (a tool's key lives in Keyhole and reaches the tool through the
+// sidecar). This module validates that file and the referenced manifests strictly and offline: it
 // reads only these files, never interpolates, never runs a command supplied by
 // configuration, and never reaches the network. Offline agreement proves
 // interface compatibility only, not live registration.
@@ -11,28 +13,17 @@
 import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 import { parseStrictJson } from "./json.js";
-import { normalizeSuffix } from "../roles/registry.js";
-import { isKnownRole } from "../roles/index.js";
 import { configError, conflictError } from "../errors.js";
-import { validateServiceUrl } from "./config.js";
 import { ARG_RE, BIN_RE, ENV_NAME_RE } from "../install/tool-declaration.js";
 
-// The two contracts the bundled tool packages implement. Any other contract is accepted:
+// A contract the bundled tool packages implement. Any other contract is accepted:
 // a tool binds to a role only where the role's descriptor lists its contract, so an
 // unknown contract reaches no role until someone grants it.
-export const FORGEJO_CONTRACT = "vbcdx.forgejo/1";
 export const COOLIFY_CONTRACT = "vbcdx.coolify/1";
 // Same shapes as the tool declaration schema (schema/vbcdx-tool.schema.json):
 // server_name and contract.
 const SERVICE_NAME_RE = /^[a-z][a-z0-9-]{0,62}[a-z0-9]$/;
-export const isServiceName = (name) => typeof name === "string" && SERVICE_NAME_RE.test(name);
 const CONTRACT_RE = /^[a-z0-9][a-z0-9.-]{0,62}\/[1-9][0-9]{0,3}$/;
-// Service names whose derived Hermes bearer key, VBCDX_<SERVICE>_TOKEN, already means
-// something: forgejo-git would get VBCDX_FORGEJO_GIT_TOKEN, the read-scoped git token a
-// read role holds instead of a write-capable one, and agents would get VBCDX_AGENTS_TOKEN,
-// the credential-file key. The derivation is one-to-one otherwise: names have no
-// underscores, so "-" -> "_" cannot merge two names.
-export const RESERVED_SERVICE_NAMES = Object.freeze(["agents", "forgejo-git"]);
 const VALID_EFFECTS = new Set(["read", "write", "destructive"]);
 // A tool name lands in every harness's rendered allowlist (mcp__<server>__<tool>).
 const TOOL_NAME_RE = /^[A-Za-z0-9_.-]{1,128}$/;
@@ -61,7 +52,7 @@ export function validateManifest(obj, service, source) {
   if (obj.schema_version !== 1) throw conflictError(`Manifest ${source} has unsupported schema_version ${obj.schema_version}.`);
   if (obj.service !== service) throw conflictError(`Manifest ${source} declares service ${obj.service}, expected ${service}.`);
   if (typeof obj.contract !== "string" || !CONTRACT_RE.test(obj.contract)) {
-    throw conflictError(`Manifest ${source} declares contract ${JSON.stringify(obj.contract)}; a contract looks like <name>/<major>, e.g. ${FORGEJO_CONTRACT}.`);
+    throw conflictError(`Manifest ${source} declares contract ${JSON.stringify(obj.contract)}; a contract looks like <name>/<major>, e.g. vbcdx.forgejo/1.`);
   }
   if (typeof obj.package_version !== "string" || obj.package_version === "") {
     throw configError(`Manifest ${source} is missing package_version.`);
@@ -135,33 +126,47 @@ function readJsonFile(absPath, label) {
   return parseStrictJson(raw, absPath);
 }
 
+// What an earlier version accepted to hand a role a credential, and no longer does.
+const REMOVED_CREDENTIAL_FIELDS = Object.freeze(["credentials", "headers", "allow_cleartext"]);
+// An http service: every call to one carried the role's bearer token.
+const REMOVED_HTTP_FIELDS = Object.freeze(["transport", "url", "roles", "tool_prefix"]);
+// Hermes git: a git host's token in a role's terminal. Not in this release.
+const REMOVED_GIT_FIELDS = Object.freeze(["git_url", "git_roles"]);
+
 /**
- * True for a plain-http URL whose host is not loopback (localhost, ::1, 127.0.0.0/8).
- * WHATWG URL normalises every IPv4 spelling (127.1, 0x7f.1) to dotted-quad, so the
- * anchored pattern is exact; a DNS name such as 127.evil.example is not loopback.
+ * The fields of one service entry that are refused, in two groups. Field names only; no
+ * value is read, except that `transport` is refused only when it says "http".
+ *
+ * `credential`: what carried, or pointed a role's bearer token at, a credential:
+ * `credentials` (role -> credential file), `headers`, `allow_cleartext` (it only ever
+ * allowed a bearer token over plain http), and an http service (`transport`, `url`,
+ * `roles`, `tool_prefix`).
+ *
+ * `git`: `git_url` and `git_roles`, and with them the http fields of the service that
+ * carried them, which were there only for git.
  */
-export function isCleartextOffHost(value) {
-  const u = new URL(value);
-  const host = u.hostname.replace(/^\[|\]$/g, "");
-  const loopback = host === "localhost" || host === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
-  return u.protocol === "http:" && !loopback;
+function removedFields(svc) {
+  const has = (f) => Object.hasOwn(svc, f);
+  const credential = REMOVED_CREDENTIAL_FIELDS.filter(has);
+  const http = REMOVED_HTTP_FIELDS.filter((f) => has(f) && (f !== "transport" || svc.transport === "http"));
+  const git = REMOVED_GIT_FIELDS.filter(has);
+  return git.length ? { credential, git: [...http, ...git] } : { credential: [...credential, ...http], git };
 }
 
 /**
  * Load and validate the integrations file and every referenced manifest.
- * Validates structure and manifests globally; per-role credential-file access
- * is checked later against the selection.
  *
- * A service uses the stdio transport by default (started by its `stdio` launch, or
- * its installed tool's), binding a role through an explicit credential-file mapping
- * (`credentials`). With `transport: "http"` it is reached at `url` (the server's network mode,
- * e.g. through an MCP gateway), identity travels per request in a header the
- * harness supplies, and roles are bound by an explicit `roles` list — there is
- * no credential file for that service.
+ * Every service is a stdio service (started by its `stdio` launch, or its installed
+ * tool's). The file binds no role to a service: roles are bound to the tools
+ * `vbcdx install tool` registered, so `roles` is always empty here.
+ *
+ * Every field that carried a per-role credential, every field of an http service and the
+ * Hermes git fields are refused, for the whole file at once, with a message that names
+ * the fields to remove and nothing else.
  *
  * @returns {{services: Record<string, {serverName:string, manifestFile:string,
- *   contract:string, packageVersion:string, tools:string[], transport:string,
- *   url:string|null, roles:string[], credentials: Record<string,string>}>}}
+ *   contract:string, packageVersion:string, tools:string[], roles:string[],
+ *   stdio?:{command:string, args:string[], env:Record<string,string>}}>}}
  */
 export function loadIntegrations(absPath) {
   const root = readTrustedJsonFile(absPath, "integrations file");
@@ -171,18 +176,21 @@ export function loadIntegrations(absPath) {
   if (!root.services || typeof root.services !== "object") throw configError("Integrations file has no services object.");
 
   const services = {};
+  const removed = { credential: [], git: [] };
   for (const [name, svc] of Object.entries(root.services)) {
     if (!SERVICE_NAME_RE.test(name)) {
       throw configError(`Service name ${JSON.stringify(name)} in integrations file must be 2-64 characters of lowercase letters, digits and hyphens, starting with a letter and not ending with a hyphen.`);
     }
-    if (RESERVED_SERVICE_NAMES.includes(name)) {
-      throw configError(`Service name ${JSON.stringify(name)} in integrations file is reserved: its token key would be one the installer already uses. Pick another name.`);
-    }
     if (!svc || typeof svc !== "object") throw configError(`Service ${name} must be an object.`);
-    onlyKeys(svc, ["server_name", "manifest_file", "credentials", "transport", "url", "roles", "tool_prefix", "allow_cleartext", "git_url", "git_roles", "stdio"], `service ${name}`);
-    const transport = svc.transport === undefined ? "stdio" : svc.transport;
-    if (transport !== "stdio" && transport !== "http") {
-      throw configError(`Service ${name} transport must be "stdio" or "http".`);
+    const refused = removedFields(svc);
+    if (refused.credential.length || refused.git.length) {
+      // Collected for every service, so one run names everything there is to remove.
+      for (const group of ["credential", "git"]) removed[group].push(...refused[group].map((f) => `${name}.${f}`));
+      continue;
+    }
+    onlyKeys(svc, ["server_name", "manifest_file", "transport", "stdio"], `service ${name}`);
+    if (svc.transport !== undefined && svc.transport !== "stdio") {
+      throw configError(`Service ${name} transport must be "stdio".`);
     }
     if (svc.server_name !== name) {
       throw configError(`Service ${name} server_name must be exactly "${name}".`);
@@ -191,107 +199,29 @@ export function loadIntegrations(absPath) {
     const manifestObj = readJsonFile(manifestFile, `${name} manifest`);
     const tools = validateManifest(manifestObj, name, manifestFile);
 
-    let url = null;
-    let toolPrefix = "";
-    const roles = [];
-    if (transport === "http") {
-      if (svc.credentials !== undefined) {
-        throw configError(`Service ${name} uses transport "http": identity is per request, so it takes a roles list, not credentials.`);
-      }
-      if (typeof svc.url !== "string") throw configError(`Service ${name} transport "http" requires a url.`);
-      url = validateServiceUrl(`service ${name} url`, svc.url);
-      // Every call carries a role's bearer token: plain http to a non-loopback host needs an
-      // explicit opt-in (e.g. a private container network); init still warns.
-      if (svc.allow_cleartext !== undefined && typeof svc.allow_cleartext !== "boolean") {
-        throw configError(`Service ${name} allow_cleartext must be true or false.`);
-      }
-      if (isCleartextOffHost(url) && svc.allow_cleartext !== true) {
-        throw configError(`Service ${name} url sends bearer tokens over plain http to a non-loopback host; use https, or set "allow_cleartext": true if that host is on a trusted private network.`);
-      }
-      // A gateway may namespace the companion's tools (LiteLLM lists them as
-      // "<ServerAlias>-<tool>"); tool_prefix makes rendered allow-lists match.
-      if (svc.tool_prefix !== undefined) {
-        // no "." — Claude/OpenCode tool IDs are built from it (mcp__<server>__<prefix><tool>)
-        if (typeof svc.tool_prefix !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(svc.tool_prefix)) {
-          throw configError(`Service ${name} tool_prefix must be 1-64 characters of [A-Za-z0-9_-].`);
-        }
-        toolPrefix = svc.tool_prefix;
-      }
-      if (!Array.isArray(svc.roles)) throw configError(`Service ${name} transport "http" requires a roles array.`);
-      for (const roleId of svc.roles) {
-        if (!isKnownRole(roleId)) throw configError(`Service ${name} role ${JSON.stringify(roleId)} is not a role of a loaded agent pack.`);
-        if (roles.includes(roleId)) throw configError(`Service ${name} lists role ${roleId} twice.`);
-        roles.push(roleId);
-      }
-    } else if (svc.url !== undefined || svc.roles !== undefined || svc.tool_prefix !== undefined || svc.allow_cleartext !== undefined) {
-      throw configError(`Service ${name}: url, roles, tool_prefix and allow_cleartext are only valid with transport "http".`);
-    }
-    if (svc.stdio !== undefined && transport !== "stdio") {
-      throw configError(`Service ${name}: stdio is only valid with transport "stdio".`);
-    }
     const stdio = svc.stdio === undefined ? null : parseStdioLaunch(name, svc.stdio);
-    // Hermes git: where the role's Forgejo token clones from and pushes to its fork.
-    // Only for a Forgejo-contract service over http: the token is the one the profile's .env holds.
-    let gitUrl = null;
-    if (svc.git_url !== undefined) {
-      if (manifestObj.contract !== FORGEJO_CONTRACT || transport !== "http") {
-        throw configError(`Service ${name}: git_url is only valid for a ${FORGEJO_CONTRACT} service with transport "http".`);
-      }
-      if (typeof svc.git_url !== "string") {
-        throw configError(`Service ${name} git_url must be a string.`);
-      }
-      if (/[\u0000-\u0020\u007f"'`\\$]/.test(svc.git_url)) {
-        throw configError(`Service ${name} git_url must be a plain URL: no whitespace, control characters, quotes, backslashes or "$".`);
-      }
-      gitUrl = validateServiceUrl(`service ${name} git_url`, svc.git_url).replace(/\/+$/, "");
-      if (isCleartextOffHost(gitUrl)) {
-        throw configError(`Service ${name} git_url sends the role's token over plain http to a non-loopback host; use https.`);
-      }
-    }
-    // Which roles get git, and how: "fork" clones through the role's fork with its own token;
-    // "read" clones read-only with a separate read-scoped token. git_url alone enables no role.
-    const gitRoles = Object.create(null);
-    if (svc.git_roles !== undefined) {
-      if (gitUrl === null) throw configError(`Service ${name}: git_roles needs git_url.`);
-      if (!svc.git_roles || typeof svc.git_roles !== "object" || Array.isArray(svc.git_roles)) {
-        throw configError(`Service ${name} git_roles must be an object of role id -> "read" or "fork".`);
-      }
-      for (const [roleId, mode] of Object.entries(svc.git_roles)) {
-        if (!isKnownRole(roleId)) throw configError(`Service ${name} git_roles role ${JSON.stringify(roleId)} is not a role of a loaded agent pack.`);
-        if (!roles.includes(roleId)) throw configError(`Service ${name} git_roles lists ${roleId}, which is not in the service's roles.`);
-        if (mode !== "read" && mode !== "fork") {
-          throw configError(`Service ${name} git_roles.${roleId} must be "read" or "fork", not ${JSON.stringify(mode)}.`);
-        }
-        gitRoles[roleId] = mode;
-      }
-    }
 
-    const credentials = {};
-    const creds = svc.credentials || {};
-    if (typeof creds !== "object") throw configError(`Service ${name} credentials must be an object.`);
-    const normalizedSeen = new Map();
-    for (const [roleId, credPath] of Object.entries(creds)) {
-      if (!isKnownRole(roleId)) throw configError(`Service ${name} credential role ${JSON.stringify(roleId)} is not a role of a loaded agent pack.`);
-      const norm = normalizeSuffix(roleId.toUpperCase().replace(/-/g, "_"));
-      if (normalizedSeen.has(norm)) throw configError(`Service ${name} has ambiguous credential role keys for ${roleId}.`);
-      normalizedSeen.set(norm, roleId);
-      credentials[roleId] = assertAbsolute(`service ${name} credential path for ${roleId}`, credPath);
-    }
     services[name] = {
       serverName: name,
       manifestFile,
       contract: manifestObj.contract,
       packageVersion: manifestObj.package_version,
       tools,
-      transport,
-      url,
-      roles,
-      toolPrefix,
-      credentials,
-      gitUrl,
-      gitRoles,
+      roles: [],
       ...(stdio ? { stdio } : {}),
     };
+  }
+  if (removed.credential.length || removed.git.length) {
+    const parts = [];
+    if (removed.credential.length) {
+      parts.push(`per-role credentials are no longer read or sent; remove these fields: ${removed.credential.join(", ")}. ` +
+        "Put each key in Keyhole and grant the tool (README, \"How a tool gets its key\").");
+    }
+    if (removed.git.length) {
+      parts.push(`Hermes git isn't in this release; remove these fields: ${removed.git.join(", ")}. ` +
+        "The installer gives no role a git credential (README, \"Hermes git is removed\").");
+    }
+    throw configError(`Integrations file ${absPath}: ${parts.join(" ")}`);
   }
   return { services };
 }

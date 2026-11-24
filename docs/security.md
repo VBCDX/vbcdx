@@ -10,7 +10,7 @@ the sidecar on each agent host, the control plane, Keyhole and Dispatch. How to 
 
 | Secret | Where | Who can read it |
 |---|---|---|
-| A tool's key (an API key a tool call needs) | `keyhole.db` in Keyhole's state directory, sealed with the instance's key-encryption key (KEK) | the Keyhole server, which opens it in memory only to seal it to a request. Nobody holds it in the clear at rest |
+| A tool's key (an API key a tool call needs) | `keyhole.db` in Keyhole's state directory, sealed with the instance's key-encryption key (KEK) | the Keyhole server, which opens it in memory only to seal it to a request (which a compromised control plane can make itself; see "What you trust"). Nobody holds it in the clear at rest |
 | The KEK | `kek` in Keyhole's state directory (`/var/lib/vbcdx-keyhole/<instance>`, 0700 `vbcdx-keyhole`, files 0600) | the `vbcdx-keyhole` user and root on the Keyhole host |
 | A tool's key during a call | the sidecar's memory on the agent host, for that one call | the sidecar process (its user) and root on that host, during the call |
 | Your signed-in session (CLI) | `~/.vbcdx/credentials/services/<instance>/session.json`, 0600 | you and root on that host. The control plane keeps only a hash of it |
@@ -19,7 +19,7 @@ the sidecar on each agent host, the control plane, Keyhole and Dispatch. How to 
 | The control plane's state | `/var/lib/vbcdx-control/<instance>` (`control.db`, SQLite: users' password hashes, session hashes, the sidecar and service registry), 0700 `vbcdx-control`, files 0600 | the `vbcdx-control` user and root on the control-plane host |
 | Dispatch's webhook secrets | Dispatch's database, sealed with `SESSION_SECRET` if it is set, otherwise with `webhook.key` in Dispatch's state directory (`/var/lib/vbcdx-dispatch/<instance>`, 0700 `vbcdx-dispatch`, files 0600) | the `vbcdx-dispatch` user and root on the Dispatch host |
 | Dispatch's messages | `dispatch.db` and `nats/` in Dispatch's state directory, **not encrypted at rest** | the `vbcdx-dispatch` user and root on the Dispatch host |
-| The tunnel CA key | `tunnel/ca.key` in the control plane's state directory (`tunnel/` 0700, files 0600) | the `vbcdx-control` user and root on the control-plane host. It signs every sidecar's client certificate, so whoever holds it can make a certificate the tunnel accepts for an enrolled sidecar's identity. Acting as a user still needs that user's session or password |
+| The tunnel CA key | `tunnel/ca.key` in the control plane's state directory (`tunnel/` 0700, files 0600) | the `vbcdx-control` user and root on the control-plane host. It signs every sidecar's client certificate, so whoever holds it can make a certificate the tunnel accepts for an enrolled sidecar's identity. Acting as a user still needs that user's session or password, but the same host also vouches for sidecars to Keyhole (see "What you trust") |
 | A sidecar's tunnel credentials | `tunnel/` in the sidecar's state directory (0700, files 0600): `tunnel.key` and `tunnel.crt` (its client key and certificate), `control-ca.crt`, `sidecar-id`, and `grant.x25519` (an X25519 private key) | the sidecar's user and root on that host. Whoever holds `tunnel.key` with its certificate can connect to the control plane as that sidecar until it is revoked. The sidecar refuses to start with wider modes or another owner |
 
 Settings files (`*.toml`, `*.env` under `/etc/vbcdx…`) are 0640, root and the service's group. The
@@ -29,6 +29,22 @@ enrollment token is written to a 0600 file and never printed. Passwords are read
 a 0600 file, never from the command line.
 
 ## How a tool's key travels
+
+This is the only way a tool gets a key from Keyhole. The installer writes no credential file,
+and no harness configuration it writes holds a key or a header. A tool package that asks for a key
+is refused at `vbcdx install tool`, and the installer gives no role a credential, for git or for
+any other tool.
+
+One rendered tool uses a key that the installer doesn't manage: **Hermes web search**. Its plugin
+reads the Hermes profile's own model-provider key (`HERMES_PROVIDER_API_KEY`, or else
+`LITELLM_SEARCH_API_KEY`) from the profile's environment and sends it as a bearer token only to
+the configured search gateway (`VBCDX_AGENTS_HERMES_WEB_SEARCH_URL`). It refuses redirects and uses
+no proxy, so the key goes to no other host. Point the search gateway at the same gateway as the
+model, so the key goes nowhere the model key doesn't already go. A later release moves search
+behind the sidecar.
+
+Git you set up yourself for the agent's OS user (a credential helper, an SSH key) is your
+deployment's configuration, outside what this protects.
 
 When an agent calls a tool that needs a key, the agent never sees the key:
 
@@ -41,9 +57,13 @@ When an agent calls a tool that needs a key, the agent never sees the key:
 4. The sidecar rebuilds that binding from the definition it is about to use, opens the key only if
    it matches, makes the call itself and passes back the service's reply.
 
-So a relay on the way, the control plane included, can't redirect a key to another address or
-tool: a changed definition doesn't open. The key is not written to disk, not put in a log, and not
-returned on the agent's socket. Nothing is cached in this version: every call asks Keyhole again.
+So a relay on the way can't redirect a key to another address or tool: a changed definition
+doesn't open. That holds against a relay that only passes the reply on. It doesn't hold against a
+**compromised control plane**: the control plane vouches for which sidecar is asking, and the
+request key isn't yet bound to that sidecar, so a control plane that lies can ask Keyhole with a
+key of its own and open the value. This release trusts the control plane for that (see "What you
+trust" and "What this release doesn't protect against"). The key is not written to disk, not put
+in a log, and not returned on the agent's socket. Nothing is cached in this version: every call asks Keyhole again.
 Details: [VBCDX/vbcdx-core `docs/tool-calls.md`](https://github.com/VBCDX/vbcdx-core/blob/main/docs/tool-calls.md)
 and [VBCDX/keyhole `docs/resolve.md`](https://github.com/VBCDX/keyhole/blob/main/docs/resolve.md).
 
@@ -55,8 +75,12 @@ and [VBCDX/keyhole `docs/resolve.md`](https://github.com/VBCDX/keyhole/blob/main
   against a compromised root.
 - **The tunnel CA on the control-plane host.** It decides which sidecars the tunnel accepts. Keep
   that host as closely held as the Keyhole host.
-- **The control plane** checks every session and forwards requests. It never sees a tool's key in
-  the clear, and it can't redirect one (above), but it decides who is signed in and who is a member.
+- **The control plane** checks every session and forwards requests, and it decides who is signed in
+  and who is a member. An honest control plane relays a tool's key only sealed, so it never holds it
+  in the clear and can't redirect it (above). **You also trust it with the keys themselves:** it
+  vouches for which sidecar asks Keyhole, so a compromised control plane can request any granted
+  key, at any time, with a request key of its own, and read it. Keep the control-plane host as
+  closely held as the Keyhole host.
 - **The installer's own inputs.** The integrations file decides which programs start for a stdio
   service, so the installer reads it only when no one but its owner can change it: a regular file
   (not a symlink), owned by you or root, writable by no one else, and its own directory not
@@ -76,6 +100,11 @@ and [VBCDX/keyhole `docs/resolve.md`](https://github.com/VBCDX/keyhole/blob/main
 
 A session also ends by itself after 12 hours, and it is bound to the sidecar it was made on.
 
+Versions up to 0.2.14 of the installer wrote per-role credential files under
+`~/.vbcdx/credentials/`. This version doesn't read them, and `vbcdx doctor` fails and lists each
+one until it is gone. Deleting such a file revokes nothing: revoke the token at its service first,
+then delete the file. The `services/` directory there is the CLI session store above and stays.
+
 The control plane logs one line per routed request that reaches it through the tunnel: the peer
 (the sidecar's id or the service's name), the method, the route template and the status. It never
 logs a path's values, a query, a header value, a body or a token. A request to an unknown route, a
@@ -86,11 +115,23 @@ revoke.
 ## What this release doesn't protect against
 
 - **A compromised root on any host.** See "What you trust".
+- **A compromised control plane.** It can request any key granted in the organizations Keyhole
+  accepts it for, at any time, even with no sidecar online, by asking Keyhole with a request key of
+  its own. Keyhole records every value it releases before it releases it, in its own store, which
+  the control plane's service user can't write: who it was for, which sidecar was named, and the
+  tool and slot. Each sidecar logs every tool call it makes, at the default log level (the
+  organization, tool, slot and time). A release in Keyhole's audit log that the named sidecar's log
+  doesn't show is how you'd see this. If the control plane and Keyhole share a host, root there can
+  read Keyhole's keys directly anyway (see "Root on each host"). Binding the request key to a key
+  registered for each sidecar, so the control plane can't substitute one, is planned for a later
+  release.
 - **A service that echoes its request headers.** The key reaches the tool's service and nothing
   else, but a service that sends its request headers back in its reply would hand the key to
   whoever made the call. Grant only tools whose service doesn't do that.
 - **Dispatch messages aren't encrypted at rest.** The `vbcdx-dispatch` user and root on the Dispatch
   host can read them. Only its webhook secrets and sign-in cookie are sealed.
+- **Credential files from an earlier installer version.** They stay on disk, with working
+  tokens, until you revoke the tokens and delete the files. vbcdx only reports them.
 - **A plain remove leaves the keys on disk.** `vbcdx remove service <name>` without `--wipe` keeps
   the state directory: the control plane's `control.db` and `tunnel/ca.key`, Keyhole's `kek` and
   `keyhole.db`, Dispatch's database, messages and `webhook.key`, and the link keys. A later `remove … --wipe` exits 2 and deletes nothing. Delete them

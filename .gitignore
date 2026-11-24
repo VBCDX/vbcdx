@@ -11,3 +11,7 @@ vbcdx-store/
 # Agent packs placed in the A2A image build context (see packs/README.md).
 packs/*
 !packs/README.md
+
+# Local environment files, possibly holding credentials (excluded as sensitive from the build context too).
+.env
+*.local.env

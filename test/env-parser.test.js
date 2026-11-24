@@ -33,6 +33,39 @@ test("double-quoted values use JSON escaping", () => {
   assert.equal(m.get("K"), 'a\tb"c');
 });
 
+test("a double-quoted numeric value decodes to the string, never a number", () => {
+  // The double-quoted grammar is JSON string escaping, so "123" is the string "123". A decode
+  // that turned a numeric-looking quoted value into a number would break every consumer that
+  // expects a string, and would only fail later, at env-parser.js:116 (`value.includes`), as a
+  // TypeError instead of a configuration error.
+  const m = parseEnvText('FOO="123"\nBAR="1e3"\n');
+  assert.equal(typeof m.get("FOO"), "string");
+  assert.equal(m.get("FOO"), "123");
+  assert.equal(m.get("BAR"), "1e3");
+});
+
+test("a decode that yields a non-string is refused as a malformed value", (t) => {
+  // env-parser.js:45-47 guards decodeDoubleQuoted's return. With the shipped decode it cannot
+  // fire: `raw` starts with `"` (line 110), so JSON.parse either returns a string or throws.
+  // It stays because a decode change (a lenient parse, a JSON reviver, a switch off JSON.parse)
+  // can make it live, and without it a number would reach line 116 and throw a TypeError.
+  // Hold the parse for one call so the decode returns a number and assert the guard's own error.
+  t.mock.method(JSON, "parse", () => 123);
+  try {
+    try {
+      parseEnvText('FOO="123"\n');
+      assert.fail("a non-string decode must be refused");
+    } catch (err) {
+      assert.equal(err.name, "InstallerError", `expected a configuration error, got ${err.name}: ${err.message}`);
+      assert.equal(err.code, 2);
+      assert.match(err.message, /Malformed value for FOO at line 1: expected a quoted string\./);
+      assert.doesNotMatch(err.message, /123/, "the error never carries the value");
+    }
+  } finally {
+    t.mock.restoreAll();
+  }
+});
+
 test("rejects decoded line breaks in a double-quoted value", () => {
   assert.throws(() => parseEnvText('K="a\\nb"\n'), /line break/);
 });

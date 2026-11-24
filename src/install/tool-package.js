@@ -64,7 +64,7 @@ export function runToolManifest(toolPkg, { timeoutMs = 30000, env = process.env 
   const launch = binLaunch(toolPkg, declaration.stdio.bin, declaration.manifest.args);
   const command = launch.command === "node" ? process.execPath : launch.command;
   const res = spawnSync(command, launch.args, { encoding: "utf8", timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, env: toolChildEnv(declaration, env) });
-  if (res.error) throw subprocessError(`${toolPkg.name} manifest command failed to run: ${res.error.code || res.error.message}.`);
+  if (res.error) throw subprocessError(`${toolPkg.name} manifest command failed to run: ${res.error.code}.`);
   if (res.status !== 0) throw subprocessError(`${toolPkg.name} manifest command exited ${res.status}.`);
   let parsed;
   try {

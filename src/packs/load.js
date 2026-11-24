@@ -9,16 +9,15 @@
 // As for the tool declaration, every per-field rule is read from the shipped schemas
 // so the validator and the schemas cannot drift. The rules that span fields or files
 // live only here: the two directories resolve inside the package, every listed role
-// has its directory with both files, a role's id is its directory name, its
-// credential_suffix is derived from the id, and every contract a role depends on is
-// one the pack declares.
+// has its directory with both files, a role's id is its directory name, and every
+// contract a role depends on is one the pack declares. A role.json may still carry the
+// credential_suffix field earlier versions required; it is accepted and ignored.
 
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, sep } from "node:path";
 import { parseStrictJson } from "../config/json.js";
 import { configError } from "../errors.js";
-import { idToSuffix } from "../roles/registry.js";
 import { checkPackageIdentity } from "../install/locate.js";
 
 export const PACK_DECLARATION_FILE = "vbcdx-pack.json";
@@ -46,7 +45,6 @@ const PACK_RE = {
 const RP = ROLE.properties;
 const ROLE_RE = {
   id: re(RP.id),
-  suffix: re(RP.credential_suffix),
   line: re(ROLE.$defs.line),
   service: re(ROLE.$defs.service),
   kind: re(RP.policy.properties.kind),
@@ -168,8 +166,8 @@ export function validatePackDeclaration(decl) {
 }
 
 /**
- * Validate one parsed role.json against the role schema, plus the two cross-field
- * rules: id is the role's directory name, credential_suffix is derived from it.
+ * Validate one parsed role.json against the role schema, plus the one rule that spans
+ * files: id is the role's directory name. credential_suffix, if present, is not checked.
  * @returns {{ok: boolean, errors: string[]}}
  */
 export function validateRoleDescriptor(descriptor, expectedId) {
@@ -181,10 +179,6 @@ export function validateRoleDescriptor(descriptor, expectedId) {
   if ("id" in d) {
     if (typeof d.id !== "string" || d.id.length > RP.id.maxLength || !ROLE_RE.id.test(d.id)) errors.push("id must be lowercase hyphenated words.");
     else if (expectedId !== undefined && d.id !== expectedId) errors.push(`id ${d.id} does not match its directory ${expectedId}.`);
-  }
-  if ("credential_suffix" in d) {
-    if (typeof d.credential_suffix !== "string" || !ROLE_RE.suffix.test(d.credential_suffix)) errors.push("credential_suffix must be upper-case words joined by underscores.");
-    else if (typeof d.id === "string" && d.credential_suffix !== idToSuffix(d.id)) errors.push(`credential_suffix must be ${idToSuffix(d.id)} (the id upper-cased, hyphens as underscores).`);
   }
   if ("name" in d) checkLine(d.name, RP.name.maxLength, "name", errors);
   if ("description" in d) checkLine(d.description, RP.description.maxLength, "description", errors);

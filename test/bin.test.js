@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,7 +31,7 @@ test("missing --harness exits 2 (config)", () => {
   assert.match(r.stderr, /--harness is required/);
 });
 
-test("a full credential-free install exits 0 and reports actions", () => {
+test("a full install exits 0 and reports actions", () => {
   const root = mkdtempSync(join(tmpdir(), "vbcdx-bin-"));
   const cfg = join(root, "c.env");
   writeFileSync(cfg, [
@@ -45,6 +45,29 @@ test("a full credential-free install exits 0 and reports actions", () => {
   rmSync(root, { recursive: true, force: true });
 });
 
+// A base directory whose manifests/ is a regular file: mkdirSync throws a raw EEXIST
+// inside executePlan, before any try, so the alias's own error path reports it and the
+// run exits 4 (filesystem), not 0 and not a config error.
+test("a filesystem failure under the base directory exits 4 and writes no manifest", () => {
+  const root = mkdtempSync(join(tmpdir(), "vbcdx-bin-fs-"));
+  try {
+    mkdirSync(join(root, "base"));
+    writeFileSync(join(root, "base", "manifests"), "x");
+    const cfg = join(root, "c.env");
+    writeFileSync(cfg, [
+      `VBCDX_AGENTS_BASE_DIR=${root}/base`,
+      `VBCDX_AGENTS_CREDENTIALS_DIR=${root}/creds`,
+      `VBCDX_AGENTS_CLAUDE_CONFIG_DIR=${root}/claude`,
+    ].join("\n") + "\n");
+    const r = run(["init", PACK_ARG, "--harness=claude", `--env=${cfg}`]);
+    assert.equal(r.status, 4, r.stderr);
+    assert.match(r.stderr, /^error: (ENOTDIR|EEXIST): /m);
+    // It landed on the filesystem handler, not on an argument or config guard.
+    assert.doesNotMatch(r.stderr, /usage:/);
+    assert.equal(existsSync(join(root, "base", "manifests", "installation.json")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("--quiet suppresses routine progress but not warnings", () => {
   const root = mkdtempSync(join(tmpdir(), "vbcdx-bin-"));
   const cfg = join(root, "c.env");
@@ -52,13 +75,14 @@ test("--quiet suppresses routine progress but not warnings", () => {
     `VBCDX_AGENTS_BASE_DIR=${root}/state`,
     `VBCDX_AGENTS_CREDENTIALS_DIR=${root}/creds`,
     `VBCDX_AGENTS_CLAUDE_CONFIG_DIR=${root}/claude`,
-    `VBCDX_AGENTS_USER_LEGACY_BOT=u`,
-    `VBCDX_AGENTS_TOKEN_LEGACY_BOT=t`,
   ].join("\n") + "\n");
+  // A credential file an earlier version left behind: the run warns about it.
+  mkdirSync(join(root, "creds"));
+  writeFileSync(join(root, "creds", "legacy-bot.env"), "x");
   const r = run(["init", PACK_ARG, "--harness=claude", `--env=${cfg}`, "--quiet"]);
   assert.equal(r.status, 0);
   assert.equal(r.stdout.trim(), ""); // routine progress suppressed
-  assert.match(r.stderr, /warning:.*legacy-bot/); // warning not suppressed
+  assert.match(r.stderr, /warning:.*legacy-bot\.env/); // warning not suppressed
   rmSync(root, { recursive: true, force: true });
 });
 

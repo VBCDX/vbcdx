@@ -20,9 +20,8 @@ wins — else the legacy ``LITELLM_SEARCH_API_KEY``). It is sent to the gateway 
 nowhere else: it is never logged, never echoed into a tool result, never attached to
 a fetched page, and never survives into an error message. Neither request follows a
 redirect — a 3xx is reported and refused — so a ``Location`` header can never
-re-send the key to another host. That refusal is the one already established for the
-forgejo token in ``assets/hermes/hermes-git.py`` (``NoRedirect`` built into the one
-opener). This provider is read-only — it issues search queries and page reads and
+re-send the key to another host (``NoRedirect`` is built into the one opener).
+This provider is read-only — it issues search queries and page reads and
 writes nothing anywhere.
 
 Every failure returns its own visible error and never softens into "no results":
@@ -110,18 +109,16 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
     would move the request off the URL that was checked (to another scheme, host or private
     address). The cost is deliberate — a page that redirects is reported rather than silently
     followed.
-
-    This is the same refusal already set for the forgejo token: ``NoRedirect`` built into one
-    module-level opener in ``assets/hermes/hermes-git.py``.
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
 
-# The search request's opener: a 3xx is never followed. The gateway may sit on a private
-# address, so this one is not limited to public ones.
-_OPENER = urllib.request.build_opener(_NoRedirect)
+# The search request's opener: a 3xx is never followed, and no proxy from the environment
+# is used (an http_proxy would otherwise receive the request, key included). The gateway may
+# sit on a private address, so this one is not limited to public ones.
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
 
 
 # ── page fetch: public addresses only, pinned to the address that was checked ──
@@ -138,6 +135,9 @@ _DENIED_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
     "64:ff9b:1::/48",   # NAT64 local-use prefix (RFC 8215)
     "2002::/16",        # 6to4 (RFC 3056)
     "2001::/32",        # Teredo (RFC 4380)
+    "::/96",            # IPv4-compatible, deprecated (RFC 4291); embeds an IPv4 address
+    "::ffff:0:0:0/96",  # IPv4-translated (RFC 2765); the same IPv4-embedding class
+    "fec0::/10",        # deprecated site-local (RFC 3879)
     "192.0.0.0/24",     # IETF protocol assignments (RFC 6890)
     "198.18.0.0/15",    # benchmarking (RFC 2544)
     "240.0.0.0/4",      # reserved (RFC 1112)
@@ -145,12 +145,16 @@ _DENIED_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
 
 
 def _address_allowed(ip: "ipaddress._BaseAddress") -> bool:
-    """True for a globally routable unicast address.
+    """True for an address the rule allows as a public page destination.
 
-    Refuses loopback, private (RFC 1918, ULA), link-local (cloud metadata at
-    169.254.169.254), shared CGNAT, multicast, reserved and unspecified addresses, and the
-    ranges in ``_DENIED_NETWORKS`` on every Python version. An IPv4-mapped IPv6 address is
-    judged as the IPv4 address it carries.
+    Accepts only what the interpreter reports as global and unicast, and additionally
+    refuses every range in ``_DENIED_NETWORKS`` whatever that interpreter's tables say — so
+    an address an older Python reads as global (NAT64, 6to4, Teredo, the IPv4 special
+    ranges, and the deprecated IPv4-embedding and site-local ranges) is still refused. The
+    interpreter's tables are what reject non-global and multicast addresses (loopback, RFC
+    1918, ULA, link-local including cloud metadata, CGNAT, unspecified); this rule does not
+    enumerate every "reserved" address by name. An IPv4-mapped IPv6 address is judged as the
+    IPv4 address it carries.
     """
     if ip.version == 6 and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
@@ -226,7 +230,7 @@ _FETCH_OPENER = urllib.request.build_opener(
 def _key() -> str:
     """The profile's own LiteLLM virtual key. Read by name; the value is never rendered.
 
-    ``HERMES_PROVIDER_API_KEY`` wins, and that is the deliberate decision (review O2): it is
+    ``HERMES_PROVIDER_API_KEY`` wins, and that is the deliberate decision: it is
     the name this plugin's manifest advertises and the only name ``get_setup_schema()``
     prompts for, so the key the picker asks the operator for must never be shadowed by a stale
     value under some other name. ``LITELLM_SEARCH_API_KEY`` — what the hand-installed copy
@@ -566,7 +570,7 @@ class LiteLLMSearchProvider(WebSearchProvider):
             "badge": "gateway",
             "tag": "Search and page fetch through a LiteLLM gateway's search tools, with the profile's own LiteLLM key.",
             # Both names are given, in precedence order: the picker must ask for the key that
-            # actually wins (review O2). Only the advertised name is prompted for — the legacy
+            # actually wins. Only the advertised name is prompted for — the legacy
             # name is a fallback for a profile that still carries the hand-installed copy's.
             "env_vars": [{
                 "key": KEY_ENV,

@@ -29,7 +29,8 @@
 //   hermes    not supported by this installer.
 
 import { join } from "node:path";
-import { envForMode } from "./tool-declaration.js";
+import { envForMode, KEYED_TOOL_REFUSAL } from "./tool-declaration.js";
+import { configError } from "../errors.js";
 
 /** The config file, format and key path that hold a tool's MCP entry, or null (unknown harness). */
 export function mcpTarget(ctx, serverName) {
@@ -59,9 +60,17 @@ export function mcpTarget(ctx, serverName) {
  * The harness's MCP server entry for a declaration. `launch` is the absolute
  * command and arguments that start the server. Environment variables appear only
  * as references the harness resolves at start-up, never as values.
+ *
+ * An entry is a stdio launch and nothing else: it never has `headers` or a `url`, and
+ * the only variables it references are non-secret settings (kind "config"). A
+ * declaration that asks for a key is refused here as well as when it is read
+ * (validateToolDeclaration), so no caller can render a reference to a credential.
  */
 export function renderMcpEntry(harness, declaration, launch) {
   const env = envForMode(declaration.env, "stdio");
+  if ("credential_file" in declaration || env.some((e) => e.kind === "credential")) {
+    throw configError(`No MCP entry is written for ${declaration.server_name}: ${KEYED_TOOL_REFUSAL}.`);
+  }
   const command = launch.command;
   const args = [...launch.args];
   switch (harness) {

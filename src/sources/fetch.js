@@ -12,7 +12,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, relative, isAbsolute } from "node:path";
+import { basename, dirname, join, relative, isAbsolute, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import { loadSources } from "./config.js";
 import { gitEnv, readToken, resolveRef, fetchCommit } from "./git.js";
@@ -160,9 +160,12 @@ export function fetchSources({ sourcesPath, lockPath, storeDir, env = process.en
         fetchCommit(s.git, sha, tmp, opts);
       } else {
         if (!existsSync(s.dir)) throw configError(`${label}: no directory at ${s.dir}.`);
-        // A directory that holds the store would be copied into itself.
+        // A directory that holds the store would be copied into itself. The store is outside
+        // only when the relative path climbs out or is itself absolute; the source itself and
+        // a descendant (including a sibling named `..<x>`) are inside.
         const within = relative(realpathSync(s.dir), realpathSync(storeDir));
-        if (within === "" || (!within.startsWith("..") && !isAbsolute(within))) {
+        const outside = within === ".." || within.startsWith(`..${sep}`) || isAbsolute(within);
+        if (!outside) {
           throw configError(`${label}: ${s.dir} contains the store ${storeDir}; put the store outside the source (--store).`);
         }
         copyTree(s.dir, tmp);

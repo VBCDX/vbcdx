@@ -6,7 +6,7 @@ import { readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-const roots = ['bin', 'src', 'test', 'scripts'];
+const roots = ['bin', 'src', 'test', 'scripts', 'ci'];
 const files = [];
 const walk = (dir) => {
   for (const name of readdirSync(dir).sort()) {
@@ -32,4 +32,6 @@ for (const f of files) {
   }
 }
 process.stdout.write(`lint: ${files.length} files checked, ${failed} failed\n`);
-process.exit(failed ? 1 : 0);
+// Set the code rather than calling process.exit: that lets stdout drain, so the
+// summary is not truncated when stdout is a pipe. The code stays authoritative.
+process.exitCode = failed ? 1 : 0;

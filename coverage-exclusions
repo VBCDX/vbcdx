@@ -1,0 +1,4 @@
+# Files left out of the coverage totals, one per line: <path> <reason>
+# The path is a .js file under bin/ or src/. The reason is required and is reviewed like code.
+# scripts/check-coverage.mjs fails on a missing reason, a path listed twice, a path that no
+# longer exists and a path outside bin/ and src/.

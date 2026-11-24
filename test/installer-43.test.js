@@ -5,8 +5,8 @@
 //  2. Every conflict is refused before the first write, all of them listed.
 //  3. --dry-run reports the same classification, conflicts included (CLI exit 5).
 //  4. A run that fails after writing some files still records them as owned.
-//  5. Existing credential files are pre-checked too: an unsafe or invalid one
-//     refuses before the first write, and --dry-run reports it and exits 3.
+//  5. A credential file an earlier version left on disk changes none of this: it is
+//     warned about by path, never read, and never an exit code of its own.
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
@@ -280,27 +280,31 @@ test("--dry-run reports the real classification, conflicts included, and the CLI
 });
 
 test("a run that fails after writing some files still records them as package-owned", () => {
-  // No pre-check can see this one: the credential file is written after the definitions,
-  // and a write that fails there (injected, as a full disk would) stops the run.
+  // No pre-check can see this one: the second definition's write fails (injected, as a full
+  // disk would) after the first was written, and that stops the run.
   const root = mkdtempSync(join(tmpdir(), "vbcdx-43-late-"));
   roots.push(root);
   const cfg = join(root, "config.env");
-  writeFileSync(cfg, [`VBCDX_AGENTS_BASE_DIR=${root}/state`, `VBCDX_AGENTS_CREDENTIALS_DIR=${root}/creds`,
-    `VBCDX_AGENTS_CLAUDE_CONFIG_DIR=${root}/claude`, "VBCDX_AGENTS_USER_CODE_AGENT=u", "VBCDX_AGENTS_TOKEN_CODE_AGENT=t", ""].join("\n"));
+  writeFileSync(cfg, [`VBCDX_AGENTS_BASE_DIR=${root}/state`, `VBCDX_AGENTS_CLAUDE_CONFIG_DIR=${root}/claude`, ""].join("\n"));
   const args = parseInitArgs(["--harness=claude", "--env=" + cfg, "--agents=code-agent"]);
   const plan = buildPlan(args, parseEnvFile(cfg));
-  assert.equal(plan.credentialOps.length, 1, "the plan writes a credential file after the definition");
+  assert.equal(plan.generated.length, 1);
   let calls = 0;
-  const writeCredential = () => { calls++; throw new InstallerError(EXIT.FILESYSTEM, "injected: no space left on device"); };
-  assert.throws(() => executePlan(plan, { writeCredential }), (err) => {
+  const failing = { toString() { calls++; throw new InstallerError(EXIT.FILESYSTEM, "injected: no space left on device"); } };
+  const second = join(root, "claude", "agents", "late.md");
+  plan.generated.push({ ...plan.generated[0], destination: second, content: failing, digest: sha256("never written") });
+  assert.throws(() => executePlan(plan), (err) => {
     assert.equal(err.code, EXIT.FILESYSTEM, err.message);
+    assert.match(err.message, /injected/);
     return true;
   });
-  assert.equal(calls, 1, "the failure came from the credential step");
+  assert.equal(calls, 1, "the failure came from the second write");
+  assert.ok(!existsSync(second));
   const written = join(root, "claude", "agents", "code-agent.md");
   assert.ok(existsSync(written), "the definition was written before the failure");
   const manifest = JSON.parse(readFileSync(join(root, "state", "manifests", "installation.json"), "utf8"));
   assert.ok(manifest.files[written], "the written file is recorded despite the failure");
+  assert.equal(manifest.files[second], undefined, "the file that was not written is not recorded");
   // The recorded digest must be the bytes actually on disk, not merely presence
   // of an entry (restores an assertion an earlier rework dropped).
   assert.equal(manifest.files[written].digest, sha256(readFileSync(written)), "the recorded digest is the file's bytes");
@@ -351,378 +355,91 @@ test("mergeConfig replaces owned keys, drops ones no longer rendered, keeps the 
   assert.notEqual(ownedDigest({ ...two, platform_toolsets: { cli: ["a", "browser"], telegram: ["b"] } }, paths), ownedDigest(two, paths));
 });
 
-// Credential files are part of the pre-check and of --dry-run.
-function credEnv() {
+// A credential file an earlier version left behind is not part of the pre-check: it is never
+// read, so it cannot refuse a run, and it never has an exit code of its own.
+function leftoverEnv() {
   const e = hermesEnv();
   const creds = join(e.root, "creds");
-  const cfg = e.cfg.replace(/config\.env$/, "config-creds.env");
-  writeFileSync(cfg, read(e.cfg) + "VBCDX_AGENTS_USER_PM_AGENT=pm\nVBCDX_AGENTS_TOKEN_PM_AGENT=t\n");
   const soul = join(e.root, "hermes", "profiles", "pm-agent", "SOUL.md");
-  const bad = () => {
-    mkdirSync(creds, { recursive: true, mode: 0o700 });
-    chmodSync(creds, 0o700);
+  // The file an earlier version refused in every way it could: a secret on the ROLE line, mode
+  // 0644, in a directory that is not private.
+  const leave = () => {
+    mkdirSync(creds, { recursive: true });
+    chmodSync(creds, 0o755);
     const f = join(creds, "pm-agent.env");
-    writeFileSync(f, 'VBCDX_AGENTS_ROLE="pm-agent"\nVBCDX_AGENTS_USER="pm"\nVBCDX_AGENTS_TOKEN="t"\n');
-    chmodSync(f, 0o644); // not 0600: unsafe, fails even with --force
+    writeFileSync(f, 'VBCDX_AGENTS_ROLE="SECRET-ON-THE-ROLE-LINE"\nVBCDX_AGENTS_TOKEN="SECRET-TOKEN"\n');
+    chmodSync(f, 0o644);
     return f;
   };
-  return { e, cfg, creds, soul, bad };
+  return { e, cfg: e.cfg, creds, soul, leave };
 }
 
-test("an unsafe existing credential file refuses the run before the first write", () => {
-  const { cfg, soul, bad } = credEnv();
-  bad();
-  for (const extra of [[], ["--force"]]) {
-    assert.throws(() => init([PACK_ARG, "--harness=hermes", "--env=" + cfg, "--agents=pm-agent", ...extra]), (err) => {
-      assert.equal(err.code, EXIT.CREDENTIAL, err.message);
-      assert.match(err.message, /nothing was written/);
-      assert.match(err.message, /pm-agent\.env/);
-      return true;
-    });
-    assert.ok(!existsSync(soul), `no definition was written (${extra.join(" ") || "no flags"})`);
-  }
-});
-
-test("--dry-run reports an unsafe credential file as refused and exits 3", () => {
-  const { cfg, soul, bad } = credEnv();
-  const f = bad();
-  const report = init([PACK_ARG, "--harness=hermes", "--env=" + cfg, "--agents=pm-agent", "--dry-run"]);
-  assert.deepEqual(report.credentials.map((c) => [c.role, c.action]), [["pm-agent", "refused"]]);
-  assert.equal(report.credential_errors.length, 1);
-  assert.match(report.credential_errors[0], /unsafe/);
-  assert.ok(!report.credential_errors[0].includes('"t"'), "no credential value in the reason");
-  const cli = spawnSync(process.execPath, [BIN, "init", PACK_ARG, "--harness=hermes", "--env=" + cfg, "--agents=pm-agent", "--dry-run"], { encoding: "utf8" });
-  assert.equal(cli.status, EXIT.CREDENTIAL, cli.stderr);
-  assert.match(cli.stderr, /credential file\(s\) would be refused/);
-  assert.match(cli.stdout, /credential pm-agent: refused/);
-  assert.ok(!existsSync(soul), "the dry run wrote nothing");
-  assert.equal(read(f).includes("VBCDX_AGENTS_TOKEN"), true, "the credential file is untouched");
-});
-
-test("--dry-run reports the real credential action: written, retained, replaced", () => {
-  const { cfg, creds } = credEnv();
-  // No credentials dir yet: the real run would write the file.
-  let r = init([PACK_ARG, "--harness=hermes", "--env=" + cfg, "--agents=pm-agent", "--dry-run"]);
-  assert.deepEqual(r.credentials.map((c) => c.action), ["written"]);
-  assert.deepEqual(r.credential_errors, []);
-  init([PACK_ARG, "--harness=hermes", "--env=" + cfg, "--agents=pm-agent"]);
-  assert.ok(existsSync(join(creds, "pm-agent.env")));
-  // A valid file is retained without --force and replaced with it.
-  r = init([PACK_ARG, "--harness=hermes", "--env=" + cfg, "--agents=pm-agent", "--dry-run"]);
-  assert.deepEqual(r.credentials.map((c) => c.action), ["retained"]);
-  r = init([PACK_ARG, "--harness=hermes", "--env=" + cfg, "--agents=pm-agent", "--dry-run", "--force"]);
-  assert.deepEqual(r.credentials.map((c) => c.action), ["replaced"]);
-  const cli = spawnSync(process.execPath, [BIN, "init", PACK_ARG, "--harness=hermes", "--env=" + cfg, "--agents=pm-agent", "--dry-run"], { encoding: "utf8" });
-  assert.equal(cli.status, EXIT.OK, cli.stderr);
-});
-
-test("a credentials dir that is not private refuses before the first write, and --dry-run says so", () => {
-  const { cfg, creds, soul } = credEnv();
-  mkdirSync(creds, { recursive: true });
-  chmodSync(creds, 0o755); // not 0700: the secret write would refuse its parent
-  const report = init([PACK_ARG, "--harness=hermes", "--env=" + cfg, "--agents=pm-agent", "--dry-run"]);
-  assert.deepEqual(report.credentials.map((c) => c.action), ["refused"]);
-  assert.match(report.credential_errors[0], /private 0700 dir/);
-  assert.throws(() => init([PACK_ARG, "--harness=hermes", "--env=" + cfg, "--agents=pm-agent"]), (err) => {
-    assert.equal(err.code, EXIT.CREDENTIAL, err.message);
-    return true;
-  });
-  assert.ok(!existsSync(soul), "no definition was written");
-});
-
-// The refusal enumerates EVERY refused
-// credential file, not just the first. Two roles, both unsafe; the suite used to
-// carry exactly one credential op, so `refused.slice(0, 1)` survived it.
-function twoCredEnv() {
-  const e = hermesEnv();
-  const creds = join(e.root, "creds");
-  const cfg = e.cfg.replace(/config\.env$/, "config-creds-pair.env");
-  writeFileSync(cfg, read(e.cfg) +
-    "VBCDX_AGENTS_USER_PM_AGENT=pm\nVBCDX_AGENTS_TOKEN_PM_AGENT=t\n" +
-    "VBCDX_AGENTS_USER_ADVERSARIAL_AUDITOR=ci\nVBCDX_AGENTS_TOKEN_ADVERSARIAL_AUDITOR=t2\n");
-  const soul = join(e.root, "hermes", "profiles", "pm-agent", "SOUL.md");
-  const unsafe = (role) => {
-    mkdirSync(creds, { recursive: true, mode: 0o700 });
-    chmodSync(creds, 0o700);
-    const f = join(creds, `${role}.env`);
-    writeFileSync(f, `VBCDX_AGENTS_ROLE="${role}"\nVBCDX_AGENTS_USER="u"\nVBCDX_AGENTS_TOKEN="t"\n`);
-    chmodSync(f, 0o644); // not 0600: unsafe, fails even with --force
-    return f;
-  };
-  return { cfg, creds, soul, unsafe };
-}
-
-const AGENTS_TWO = ["--agents=pm-agent,adversarial-auditor"];
-
-test("every refused credential file is listed, and --dry-run reports them all (n>1)", () => {
-  const { cfg, soul, unsafe } = twoCredEnv();
-  const [f1, f2] = [unsafe("pm-agent"), unsafe("adversarial-auditor")];
-  for (const extra of [[], ["--force"]]) {
-    assert.throws(() => init([PACK_ARG, "--harness=hermes", "--env=" + cfg, ...AGENTS_TWO, ...extra]), (err) => {
-      assert.equal(err.code, EXIT.CREDENTIAL, err.message);
-      assert.match(err.message, /2 existing credential file\(s\) would fail/, `both refusals counted (${extra.join(" ") || "no flags"})`);
-      assert.ok(err.message.includes(f1) && err.message.includes(f2), "both reasons are listed, not just the first");
-      return true;
-    });
-    assert.ok(!existsSync(soul), `no definition was written (${extra.join(" ") || "no flags"})`);
-  }
-  const report = init([PACK_ARG, "--harness=hermes", "--env=" + cfg, ...AGENTS_TWO, "--dry-run"]);
-  assert.deepEqual(report.credentials.map((c) => [c.role, c.action]).sort(), [["adversarial-auditor", "refused"], ["pm-agent", "refused"]]);
-  assert.equal(report.credential_errors.length, 2, "both refusals are reported");
-  assert.ok(report.credential_errors.some((r) => r.includes(f1)) && report.credential_errors.some((r) => r.includes(f2)));
-  const cli = spawnSync(process.execPath, [BIN, "init", PACK_ARG, "--harness=hermes", "--env=" + cfg, ...AGENTS_TWO, "--dry-run"], { encoding: "utf8" });
-  assert.equal(cli.status, EXIT.CREDENTIAL, cli.stderr);
-});
-
-test("a credentials dir that is not private refuses before the first write, --force included", () => {
-  const { cfg, creds, soul } = credEnv();
-  mkdirSync(creds, { recursive: true });
-  chmodSync(creds, 0o755); // not 0700: the secret write would refuse its parent
-  // The private-dir rule is not force-gated: --dry-run reports the refusal with --force too.
-  for (const extra of [[], ["--force"]]) {
-    const report = init([PACK_ARG, "--harness=hermes", "--env=" + cfg, "--agents=pm-agent", "--dry-run", ...extra]);
-    assert.deepEqual(report.credentials.map((c) => c.action), ["refused"], `dry run refuses (${extra.join(" ") || "no flags"})`);
-    assert.equal(report.credential_errors.length, 1);
-    assert.match(report.credential_errors[0], /private 0700 dir/);
-  }
-  assert.throws(() => init([PACK_ARG, "--harness=hermes", "--env=" + cfg, "--agents=pm-agent", "--force"]), (err) => {
-    assert.equal(err.code, EXIT.CREDENTIAL, err.message);
-    return true;
-  });
-  assert.ok(!existsSync(soul), "no definition was written before the refusal (--force)");
-  // The dry run refuses with --force through the spawned CLI too (exit 3), not
-  // only through init()'s report.
-  const cli = spawnSync(process.execPath, [BIN, "init", PACK_ARG, "--harness=hermes", "--env=" + cfg, "--agents=pm-agent", "--dry-run", "--force"], { encoding: "utf8" });
-  assert.equal(cli.status, EXIT.CREDENTIAL, cli.stderr);
-  assert.match(cli.stderr, /credential file\(s\) would be refused/);
-});
-
-test("the credentials dir is created 0700 even under a umask that would strip it", () => {
-  const { e, cfg, creds } = credEnv();
-  // Pre-create every directory the run would otherwise create under the exotic
-  // umask, so the credentials dir is the only NEW directory (the original repro).
-  for (const d of [
-    join(e.root, "state"), join(e.root, "state", "manifests"),
-    join(e.root, "hermes"), join(e.root, "hermes", "profiles"), join(e.root, "hermes", "profiles", "pm-agent"),
-  ]) {
-    mkdirSync(d, { recursive: true, mode: 0o755 });
-    chmodSync(d, 0o755);
-  }
-  const old = process.umask(0o177); // would leave a plain mkdir 0600: no owner execute
-  let report;
-  try {
-    report = init([PACK_ARG, "--harness=hermes", "--env=" + cfg, "--agents=pm-agent"]);
-  } finally {
-    process.umask(old);
-  }
-  assert.ok(report.generated.length > 0, "the run completed (the creds dir did not wedge it)");
-  assert.equal(statSync(creds).mode & 0o777, 0o700, "the credentials dir is exactly 0700");
-  assert.equal(statSync(join(creds, "pm-agent.env")).mode & 0o777, 0o600);
-});
-
-test("a missing multi-level credentials-dir parent is created 0700 under an exotic umask", () => {
-  const e = hermesEnv();
-  const creds = join(e.root, "missing", ".config", "vbcdx", "credentials");
-  const cfg = join(e.root, "config-nested-creds.env");
-  writeFileSync(cfg, [
-    `VBCDX_AGENTS_BASE_DIR=${e.root}/state`,
-    `VBCDX_AGENTS_CREDENTIALS_DIR=${creds}`,
-    `VBCDX_AGENTS_HERMES_HOME=${e.root}/hermes`,
-    "VBCDX_AGENTS_USER_PM_AGENT=pm",
-    "VBCDX_AGENTS_TOKEN_PM_AGENT=t",
-    "",
-  ].join("\n"));
-  // Pre-create every OTHER directory the run would create, so the credentials
-  // chain is the only thing this run creates — the .env.example layout has a
-  // not-yet-existing parent (the test above only covers an existing one).
-  for (const d of [
-    join(e.root, "state"), join(e.root, "state", "manifests"),
-    join(e.root, "hermes"), join(e.root, "hermes", "profiles"), join(e.root, "hermes", "profiles", "pm-agent"),
-  ]) {
-    mkdirSync(d, { recursive: true, mode: 0o755 });
-    chmodSync(d, 0o755);
-  }
-  const old = process.umask(0o177); // would leave a plain mkdir 0600: no owner execute
-  let report;
-  try {
-    report = init([PACK_ARG, "--harness=hermes", "--env=" + cfg, "--agents=pm-agent"]);
-  } finally {
-    process.umask(old);
-  }
-  assert.ok(report.generated.length > 0, "the run completed (the missing parent did not wedge it)");
-  for (const dir of [
-    join(e.root, "missing"), join(e.root, "missing", ".config"),
-    join(e.root, "missing", ".config", "vbcdx"), creds,
-  ]) {
-    assert.equal(statSync(dir).mode & 0o777, 0o700, `${dir} is exactly 0700`);
-  }
-  assert.equal(statSync(join(creds, "pm-agent.env")).mode & 0o777, 0o600);
-});
-
-test("a dry run with both a credential refusal and a conflict prints the credential block first, exit 5", () => {
-  const { e, cfg, creds } = credEnv();
-  init([PACK_ARG, "--harness=hermes", "--env=" + cfg, "--agents=pm-agent"]); // create config.yaml and the creds dir
-  webUiSave(e.conf("pm-agent"), (d) => { d.platform_toolsets.cli = []; }); // hand edit of an owned key -> conflict
-  chmodSync(creds, 0o755); // and the credentials dir is no longer private -> credential refusal
-  const cli = spawnSync(process.execPath, [BIN, "init", PACK_ARG, "--harness=hermes", "--env=" + cfg, "--agents=pm-agent", "--dry-run"], { encoding: "utf8" });
-  assert.equal(cli.status, EXIT.CONFLICT, cli.stderr);
-  const credAt = cli.stderr.indexOf("credential file(s) would be refused");
-  const conflictAt = cli.stderr.indexOf("file(s) would be refused as modified outside the installer");
-  assert.ok(credAt >= 0 && conflictAt >= 0, `both blocks are present:\n${cli.stderr}`);
-  assert.ok(credAt < conflictAt, "the credential block is written before the conflict block");
-});
-
-test("an invalid credential file (wrong ROLE) refuses before the first write", () => {
-  const { cfg, creds, soul } = credEnv();
-  const secret = "SENTINEL-SECRET-9f3a";
-  mkdirSync(creds, { recursive: true, mode: 0o700 });
-  chmodSync(creds, 0o700);
-  const f = join(creds, "pm-agent.env");
-  writeFileSync(f, `VBCDX_AGENTS_ROLE="adversarial-auditor"\nVBCDX_AGENTS_USER="${secret}"\nVBCDX_AGENTS_TOKEN="${secret}"\n`);
-  chmodSync(f, 0o600); // mode is fine; only the ROLE is wrong -> invalid, not unsafe
-  const report = init([PACK_ARG, "--harness=hermes", "--env=" + cfg, "--agents=pm-agent", "--dry-run"]);
-  assert.deepEqual(report.credentials.map((c) => [c.role, c.action]), [["pm-agent", "refused"]]);
-  assert.equal(report.credential_errors.length, 1);
-  assert.match(report.credential_errors[0], /invalid/);
-  assert.ok(!report.credential_errors.join("\n").includes(secret), "no credential value in the reason");
-  assert.throws(() => init([PACK_ARG, "--harness=hermes", "--env=" + cfg, "--agents=pm-agent"]), (err) => {
-    assert.equal(err.code, EXIT.CREDENTIAL, err.message);
-    assert.match(err.message, /invalid/);
-    assert.ok(!err.message.includes(secret), "no credential value in the error");
-    return true;
-  });
-  assert.ok(!existsSync(soul), "no definition was written");
-});
-
-// The ROLE line is file content too. A secret pasted into it must not reach
-// stderr or the report through the "role field" refusal, on the dry run or the real run.
-test("a secret in the credential file's ROLE line never reaches stderr or the report", () => {
-  const { cfg, creds, soul } = credEnv();
-  const secret = "SENTINEL-ROLE-7c41";
-  mkdirSync(creds, { recursive: true, mode: 0o700 });
-  chmodSync(creds, 0o700);
-  const f = join(creds, "pm-agent.env");
-  writeFileSync(f, `VBCDX_AGENTS_ROLE="${secret}"\nVBCDX_AGENTS_USER="pm"\nVBCDX_AGENTS_TOKEN="t"\n`);
-  chmodSync(f, 0o600);
-  const run = ["init", PACK_ARG, "--harness=hermes", "--env=" + cfg, "--agents=pm-agent"];
-
-  const report = init([PACK_ARG, ...run.slice(1), "--dry-run"]);
-  assert.equal(report.credential_errors.length, 1);
-  assert.ok(!JSON.stringify(report).includes(secret), "no ROLE value in the dry-run report");
-  assert.match(report.credential_errors[0], /role field does not match the expected role pm-agent/);
-  const dry = spawnSync(process.execPath, [BIN, ...run, "--dry-run"], { encoding: "utf8" });
-  assert.equal(dry.status, EXIT.CREDENTIAL, dry.stderr);
-  assert.ok(!dry.stderr.includes(secret) && !dry.stdout.includes(secret), "no ROLE value in dry-run output");
-  assert.match(dry.stderr, /role field does not match/);
-
-  assert.throws(() => init(run.slice(1)), (err) => {
-    assert.equal(err.code, EXIT.CREDENTIAL, err.message);
-    assert.ok(!err.message.includes(secret), "no ROLE value in the error");
-    return true;
-  });
-  const real = spawnSync(process.execPath, [BIN, ...run], { encoding: "utf8" });
-  assert.equal(real.status, EXIT.CREDENTIAL, real.stderr);
-  assert.ok(!real.stderr.includes(secret) && !real.stdout.includes(secret), "no ROLE value in real-run output");
-  assert.match(real.stderr, /role field does not match/);
-  assert.ok(!existsSync(soul), "no definition was written");
-});
-
-// The dry-run exit precedence is a promise the suite must
-// pin, not just a comment. The real run refuses definition conflicts (exit 5)
-// before credential errors (exit 3) - src/executor.js:167 before :170 - so a dry
-// run that finds BOTH must exit 5 and still print both blocks. Here: an unowned
-// hand-written definition (a conflict) and a 0644 credential file (refused, fails
-// even with --force) at once. Swapping the two returns in bin/vbcdx-dev-agents.js
-// makes this dry run exit 3 and drop the conflict block; that swap fails this test.
-test("a dry run with a definition conflict AND a refused credential file exits 5 first, with both blocks", () => {
-  const { cfg, soul, bad } = credEnv();
-  const handWritten = "# a definition the installer does not own\n";
-  mkdirSync(dirname(soul), { recursive: true });
-  writeFileSync(soul, handWritten);
-  const f = bad();
-  const cli = spawnSync(process.execPath, [BIN, "init", PACK_ARG, "--harness=hermes", "--env=" + cfg, "--agents=pm-agent", "--dry-run"], { encoding: "utf8" });
-  assert.equal(cli.status, EXIT.CONFLICT, cli.stderr);
-  assert.match(cli.stderr, /existing credential file\(s\) would be refused/);
-  assert.match(cli.stderr, /would be refused as modified outside the installer or not package-owned/);
-  assert.ok(cli.stderr.includes(f), "the refused credential file is named");
-  assert.ok(cli.stderr.includes(soul), "the conflicting definition is named");
-  assert.equal(read(soul), handWritten, "still a dry run: the conflicting definition is untouched");
-});
-
-// Conflicts win over credential refusals in
-// BOTH modes, not only the dry run. The dry-run half is pinned by the test above;
-// nothing drove a real run with both stimuli, so moving the credential pre-check
-// above `refuseConflicts` in src/executor.js survived the whole suite while
-// flipping the real run's exit 5 -> 3 and dropping the conflict list. The exact
-// swap of the two dry-run returns in bin/vbcdx-dev-agents.js survived it too
-// before this table. One table, both modes, four stimuli; each cell asserts the
-// exit code and exactly which stderr blocks appear (the block text differs per
-// mode: a dry run says what "would" happen, the real run reports the refusal it
-// just took), plus that a refusal happens before the first write.
-const DRY_CONFLICT = /1 file\(s\) would be refused as modified outside the installer or not package-owned/;
-const REAL_CONFLICT = /Refusing to overwrite 1 file\(s\) modified outside the installer or not package-owned/;
-const DRY_CREDENTIAL = /1 existing credential file\(s\) would be refused \(these fail even with --force\)/;
-const REAL_CREDENTIAL = /Refusing to run: 1 existing credential file\(s\) would fail; nothing was written/;
-const PRECEDENCE_BLOCKS = [DRY_CONFLICT, REAL_CONFLICT, DRY_CREDENTIAL, REAL_CREDENTIAL];
-
-// Stimuli: a hand-written unowned definition (profiles/pm-agent/SOUL.md) and/or a
-// 0644 credential file (creds/pm-agent.env, refused even with --force).
-// `both` is the precedence cell: exit 5 in both modes. The dry run prints both
-// blocks (it reports before it returns); the real run refuses the conflict first,
-// so the credential block is never reached there.
-const PRECEDENCE = [
-  { stimulus: "neither", conflict: false, credential: false, exit: { dry: EXIT.OK, real: EXIT.OK }, blocks: { dry: [], real: [] } },
-  { stimulus: "conflict only", conflict: true, credential: false, exit: { dry: EXIT.CONFLICT, real: EXIT.CONFLICT }, blocks: { dry: [DRY_CONFLICT], real: [REAL_CONFLICT] } },
-  { stimulus: "credential only", conflict: false, credential: true, exit: { dry: EXIT.CREDENTIAL, real: EXIT.CREDENTIAL }, blocks: { dry: [DRY_CREDENTIAL], real: [REAL_CREDENTIAL] } },
-  { stimulus: "both", conflict: true, credential: true, exit: { dry: EXIT.CONFLICT, real: EXIT.CONFLICT }, blocks: { dry: [DRY_CREDENTIAL, DRY_CONFLICT], real: [REAL_CONFLICT] } },
+const CONFLICT_BLOCK = /would be refused as modified outside the installer|Refusing to overwrite \d+ file\(s\) modified outside the installer/;
+const LEFTOVER_WARNING = /^warning: 1 credential file\(s\) written by an earlier version are still on disk and are no longer read: /m;
+const LEFTOVER_ROWS = [
+  { stimulus: "neither", conflict: false, leftover: false, exit: EXIT.OK },
+  { stimulus: "conflict only", conflict: true, leftover: false, exit: EXIT.CONFLICT },
+  { stimulus: "leftover only", conflict: false, leftover: true, exit: EXIT.OK },
+  { stimulus: "both", conflict: true, leftover: true, exit: EXIT.CONFLICT },
 ];
 
-test("conflicts beat credential refusals (exit 5 over 3) in the dry run and the real run", async (t) => {
-  for (const row of PRECEDENCE) {
+test("a leftover credential file warns and decides nothing: the exit code is the conflict's alone, dry run and real run", async (t) => {
+  for (const row of LEFTOVER_ROWS) {
     for (const mode of ["dry", "real"]) {
       await t.test(`${mode === "dry" ? "--dry-run" : "real run"} / ${row.stimulus}`, () => {
-        const { cfg, soul, bad } = credEnv();
+        const { cfg, soul, creds, leave } = leftoverEnv();
         const handWritten = "# a definition the installer does not own\n";
         if (row.conflict) {
           mkdirSync(dirname(soul), { recursive: true });
           writeFileSync(soul, handWritten);
         }
-        const credentialFile = row.credential ? bad() : null;
+        const file = row.leftover ? leave() : null;
+        const before = file ? [read(file), statSync(file).mode, statSync(file).mtimeMs, statSync(creds).mode] : null;
 
         const args = ["init", PACK_ARG, "--harness=hermes", "--env=" + cfg, "--agents=pm-agent"];
         if (mode === "dry") args.push("--dry-run");
         const cli = spawnSync(process.execPath, [BIN, ...args], { encoding: "utf8" });
         const cell = `${mode}/${row.stimulus}`;
 
-        // The exit code: 5 (conflict) beats 3 (credential) in both modes.
-        assert.equal(cli.status, row.exit[mode], `exit ${row.exit[mode]} for ${cell}\nstderr: ${cli.stderr}`);
-
-        // Exactly the blocks this cell expects, and no other: a lone conflict must
-        // not print a credential block, a lone refusal must not print a conflict
-        // block, and the real run with both never reaches the credential block.
-        const expected = row.blocks[mode];
-        for (const block of PRECEDENCE_BLOCKS) {
-          if (expected.includes(block)) assert.match(cli.stderr, block, `expected block ${block} for ${cell}`);
-          else assert.doesNotMatch(cli.stderr, block, `unexpected block ${block} for ${cell}`);
-        }
-
-        // The refused item is named where its block is printed.
-        if (row.conflict) assert.ok(cli.stderr.includes(soul), `the conflicting definition is named (${cell})`);
-        if (row.credential && expected.some((b) => b === DRY_CREDENTIAL || b === REAL_CREDENTIAL)) {
-          assert.ok(cli.stderr.includes(credentialFile), `the refused credential file is named (${cell})`);
-        }
-
-        // A refusal is before the first write; only an allowed real run writes.
-        // A conflict cell's definition already exists (hand-written above), so the
-        // invariant there is that its content never changed.
-        if (row.conflict) {
-          assert.equal(read(soul), handWritten, `the conflicting definition is untouched (${cell})`);
-        } else if (row.exit[mode] === EXIT.OK) {
-          assert.equal(existsSync(soul), mode === "real", `the definition is written only by a real run (${cell})`);
+        // Exit 3 is never used: a leftover is 0 by itself, and a conflict is 5 with or without one.
+        assert.equal(cli.status, row.exit, `exit ${row.exit} for ${cell}\nstderr: ${cli.stderr}`);
+        if (row.conflict) assert.match(cli.stderr, CONFLICT_BLOCK, cell);
+        else assert.doesNotMatch(cli.stderr, CONFLICT_BLOCK, cell);
+        // The warning names the file whenever it is there, and only then. On a real run a
+        // conflict is refused before the report is printed, so the warning is the dry run's.
+        if (row.leftover && !(row.conflict && mode === "real")) {
+          assert.match(cli.stderr, LEFTOVER_WARNING, cell);
+          assert.ok(cli.stderr.includes(file), `the leftover is named (${cell})`);
         } else {
-          assert.ok(!existsSync(soul), `nothing was written before the refusal (${cell})`);
+          assert.doesNotMatch(cli.stderr, /credential file/, cell);
         }
+        assert.doesNotMatch(cli.stdout, /credential/, cell);
+        // No byte of the file is echoed, and the file and its directory are exactly as they were.
+        assert.doesNotMatch(cli.stdout + cli.stderr, /SECRET-ON-THE-ROLE-LINE|SECRET-TOKEN/, cell);
+        if (file) assert.deepEqual([read(file), statSync(file).mode, statSync(file).mtimeMs, statSync(creds).mode], before, cell);
+        else assert.ok(!existsSync(creds), `no credentials directory is created (${cell})`);
+
+        if (row.conflict) assert.equal(read(soul), handWritten, `the conflicting definition is untouched (${cell})`);
+        else assert.equal(existsSync(soul), mode === "real", `the definition is written only by a real run (${cell})`);
       });
     }
   }
+});
+
+test("no umask makes a run create a credentials directory, at any depth", () => {
+  const root = mkdtempSync(join(tmpdir(), "vbcdx-43-umask-"));
+  roots.push(root);
+  const cfg = join(root, "config.env");
+  const deep = join(root, "missing-base", ".config", "vbcdx", "credentials");
+  writeFileSync(cfg, [`VBCDX_AGENTS_BASE_DIR=${root}/state`, `VBCDX_AGENTS_CREDENTIALS_DIR=${deep}`, `VBCDX_AGENTS_CLAUDE_CONFIG_DIR=${root}/claude`, ""].join("\n"));
+  for (const mask of [0o022, 0o077, 0o002]) {
+    const previous = process.umask(mask);
+    try {
+      init([PACK_ARG, "--harness=claude", "--env=" + cfg, "--agents=code-agent", "--force"]);
+    } finally {
+      process.umask(previous);
+    }
+    assert.equal(existsSync(join(root, "missing-base")), false, `umask ${mask.toString(8)}`);
+  }
+  assert.ok(existsSync(join(root, "claude", "agents", "code-agent.md")));
 });

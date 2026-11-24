@@ -18,10 +18,13 @@ In this version:
 
 You need the control plane's tunnel listener address (`vbcdx-control` with `--tunnel`; see
 [control-plane.md](control-plane.md)) and the address the control plane will dial this
-server's link on. Pick a link port that nothing else uses. On a host that also runs the control
-plane, its tunnel already holds its port (8443 in control-plane.md), so the examples here use
-8444. Install refuses a `--listen` or `--link-listen` something already listens on, before it
-writes anything.
+server's link on. Pick a port for each that nothing else uses. The control plane's tunnel holds
+its own (8443 in control-plane.md), and a control-plane host usually runs Keyhole too, which
+keeps the web app on `127.0.0.1:8080` and its link on `127.0.0.1:8444` (see
+[keyhole-server.md](keyhole-server.md)). Both servers default `--listen` to `127.0.0.1:8080`,
+so beside Keyhole, Dispatch needs another port: the examples here use `127.0.0.1:8081` for the
+web app and `0.0.0.0:8445` for the link, so both servers fit on one host. Install refuses a
+`--listen` or `--link-listen` something already listens on, before it writes anything.
 
 Three names, one service: the installer calls the server `dispatch-server`, while the control
 plane registers it as `dispatch` (`services add dispatch`, the name in the certificate,
@@ -29,13 +32,16 @@ plane registers it as `dispatch` (`services add dispatch`, the name in the certi
 names `dispatch-server`.
 
 `--version` names a version of `@vbcdx/dispatch`. See what is published, and which version each
-dist-tag points at, with `npm view @vbcdx/dispatch versions dist-tags`.
+dist-tag points at, with `npm view @vbcdx/dispatch versions dist-tags`. Pass the exact version the
+`next` tag names, not the tag: `--version` takes a version, and refuses a range or a tag.
 
 ```sh
 sudo vbcdx install service dispatch-server --version <version> \
-  --link-listen 0.0.0.0:8444 --control-url https://<control host>:<tunnel port> --dry-run   # review the plan
+  --listen 127.0.0.1:8081 \
+  --link-listen 0.0.0.0:8445 --control-url https://<control host>:<tunnel port> --dry-run   # review the plan
 sudo vbcdx install service dispatch-server --version <version> \
-  --link-listen 0.0.0.0:8444 --control-url https://<control host>:<tunnel port>
+  --listen 127.0.0.1:8081 \
+  --link-listen 0.0.0.0:8445 --control-url https://<control host>:<tunnel port>
 ```
 
 | Flag | Meaning | Default |
@@ -52,26 +58,74 @@ install prints the next step (`next:`, the `services add dispatch` command below
 
 ## The link certificate
 
-1. Copy `/var/lib/vbcdx-dispatch/default/link.csr` (a request, not a secret) to the control host,
-   for example to `/var/lib/vbcdx-control/default/dispatch.csr`, readable by `vbcdx-control`. Then
-   run, there, with the address the control plane dials this host's `--link-listen` on, plus
-   Dispatch's link path `/vbcdx/v1` (the control plane forwards each request to `<url>/<path>`):
+1. Copy Dispatch's certificate request to the control host. It is
+   `/var/lib/vbcdx-dispatch/default/link.csr` (a request, not a secret); its directory is 0700
+   `vbcdx-dispatch` (the table below), so `vbcdx-control` can't read it in place, even on the same
+   host: copy it as root into the control plane's state directory.
 
-   ```sh
-   sudo runuser -u vbcdx-control -- /usr/local/lib/vbcdx/control-plane/current/vbcdx-control \
-     services add dispatch --url https://<this host>:8444/vbcdx/v1 \
-     --csr /var/lib/vbcdx-control/default/dispatch.csr \
-     --cert-out /var/lib/vbcdx-control/default/dispatch.crt \
-     --instance default --instance-dir /etc/vbcdx-control/default
+   Dispatch's manifest is a second, separate file, and the install never writes one: a release
+   ships the binary and its checksums. Dispatch's is the suite's own, exactly as the control plane
+   compiles it (`schema/examples/manifest-dispatch.json` in `vbcdx-core`): the four routes the
+   control plane forwards, and the op that acknowledges a pushed delivery. It is this, byte for
+   byte:
+
+   ```json
+   {
+     "schema_version": 1,
+     "name": "dispatch",
+     "sidecar_prefix": "/dispatch/v1",
+     "routes": [
+       {
+         "op": "dispatch.messages.send",
+         "method": "POST",
+         "path": "orgs/{org}/workspaces/{ws}/messages",
+         "agent": true
+       },
+       {
+         "op": "dispatch.messages.list",
+         "method": "GET",
+         "path": "orgs/{org}/workspaces/{ws}/messages",
+         "agent": true
+       },
+       {
+         "op": "dispatch.deliveries.list",
+         "method": "GET",
+         "path": "orgs/{org}/workspaces/{ws}/deliveries",
+         "agent": true
+       },
+       {
+         "op": "dispatch.deliveries.ack",
+         "method": "POST",
+         "path": "orgs/{org}/workspaces/{ws}/deliveries/{delivery_id}/ack",
+         "agent": true
+       }
+     ],
+     "ack": "dispatch.deliveries.ack"
+   }
    ```
 
-   On the same host the copy is still needed: the CSR's directory is 0700 `vbcdx-dispatch` (the
-   table below), so `vbcdx-control` can't read it in place. Copy it as root into the control
-   plane's state directory, then run the command above:
+   Save it as `docs/manifests/dispatch.json` under a directory of your choice; a checkout of these
+   docs already carries it at that path, next to this page. Run the copy below from that directory,
+   since it names the file relative to where you are, and if you saved it somewhere else, use that
+   path as the source of the second line:
 
    ```sh
    sudo install -m 0644 -o vbcdx-control -g vbcdx-control \
      /var/lib/vbcdx-dispatch/default/link.csr /var/lib/vbcdx-control/default/dispatch.csr
+   sudo install -m 0644 -o vbcdx-control -g vbcdx-control docs/manifests/dispatch.json \
+     /var/lib/vbcdx-control/default/dispatch.manifest.json
+   ```
+
+   Then run, there, with the address the control plane dials this host's `--link-listen` on, plus
+   Dispatch's link path `/vbcdx/v1` (the control plane forwards each request to `<url>/<path>`):
+
+   ```sh
+   sudo runuser -u vbcdx-control -- /usr/local/lib/vbcdx/control-plane/current/vbcdx-control \
+     services add dispatch --url https://<this host>:8445/vbcdx/v1 \
+     --csr /var/lib/vbcdx-control/default/dispatch.csr \
+     --cert-out /var/lib/vbcdx-control/default/dispatch.crt \
+     --manifest /var/lib/vbcdx-control/default/dispatch.manifest.json \
+     --instance default --instance-dir /etc/vbcdx-control/default
    ```
 
 2. Copy `dispatch.crt` back (or use it in place on the same host), then run the same install again with it:

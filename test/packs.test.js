@@ -4,11 +4,12 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { validatePackDeclaration, validateRoleDescriptor, readPack, PACK_DECLARATION_FILE } from "../src/packs/load.js";
+import { EXIT } from "../src/errors.js";
 import { buildCatalog, loadCatalog } from "../src/packs/catalog.js";
 import { FIXTURE_PACK, FIXTURE_PACK_DIR, FIXTURE_IDS, PACK_ARG } from "./helpers/fixture-pack.js";
 
@@ -122,8 +123,6 @@ test("validateRoleDescriptor: every rule, each case changing the input", () => {
     ["schema_version 2", with_({ schema_version: 2 }), /schema_version must be 1/],
     ["id not its directory", with_({ id: "other-agent", credential_suffix: "OTHER_AGENT" }), /does not match its directory code-agent/],
     ["id malformed", with_({ id: "Code" }), /id must be lowercase/],
-    ["suffix not derived from the id", with_({ credential_suffix: "CODING_AGENT" }), /credential_suffix must be CODE_AGENT/],
-    ["suffix malformed", with_({ credential_suffix: "code-agent" }), /credential_suffix must be upper-case/],
     ["name on two lines", with_({ name: "a\nb" }), /name must be one non-empty line/],
     ["empty description", with_({ description: "" }), /description must be one non-empty line/],
     ["description too long", with_({ description: "x".repeat(1001) }), /description must be one non-empty line/],
@@ -383,4 +382,46 @@ test("the A2A server refuses to start with no pack, and serves the packs VBCDX_A
   } finally {
     child.kill("SIGTERM");
   }
+});
+
+// ── readPack refusals ───────────────────────────────────────────────────────
+
+test("readPack refuses a declared skills directory that a file replaced", () => {
+  // src/packs/load.js:275 — the second half of the guard, a path that exists but is no directory.
+  const dir = tinyPack(tmp(), { skills: { "notes.md": "notes\n" } });
+  rmSync(join(dir, "skills"), { recursive: true });
+  writeFileSync(join(dir, "skills"), "not a directory\n");
+  assert.throws(() => readPack(dir), (err) => {
+    assert.equal(err.code, EXIT.CONFIG);
+    assert.deepEqual(err.details.lines, [
+      `Invalid agent pack ${join(realpathSync(dir), PACK_DECLARATION_FILE)}:`,
+      "  skills_dir skills is not a directory in the package.",
+    ]);
+    return true;
+  });
+});
+
+test("readPack refuses a role whose prompt holds only whitespace", () => {
+  // src/packs/load.js:307
+  const dir = tinyPack(tmp());
+  writeFileSync(join(dir, "roles", "solo-agent", "prompt.md"), "  \n");
+  assert.throws(() => readPack(dir), (err) => {
+    assert.equal(err.code, EXIT.CONFIG);
+    assert.deepEqual(err.details.lines, [
+      `Invalid agent pack ${join(realpathSync(dir), PACK_DECLARATION_FILE)}:`,
+      "  role solo-agent prompt.md is empty.",
+    ]);
+    return true;
+  });
+});
+
+test("readPack reports an empty version for a package.json that has none", () => {
+  // src/packs/load.js:328 — the empty-string arm, not undefined.
+  const dir = tinyPack(tmp());
+  const pkg = readJson(join(dir, "package.json"));
+  delete pkg.version;
+  writeJson(join(dir, "package.json"), pkg);
+  const pack = readPack(dir);
+  assert.equal(pack.version, "");
+  assert.equal(pack.package, "@example/tiny");
 });

@@ -46,9 +46,10 @@ export function carryOver(opts, rec, sys, host) {
     keep("service", "none", "record");
   }
 
-  let cfg;
+  // Read on demand: only the sidecar and the control-plane blocks below need it, and they are exclusive,
+  // so each carryOver reads the file at most once.
   const config = () => {
-    if (cfg) return cfg;
+    let cfg;
     const path = rec.files && rec.files[0] && rec.files[0].path;
     const flags = opts.service === "control-plane" ? "--tunnel/--tunnel-name, or --no-tunnel" : "--control-plane, or --no-control-plane";
     try {

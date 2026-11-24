@@ -40,7 +40,7 @@ const linkOf = (p) => {
 
 function must(sys, cmd, args, what) {
   const r = sys.run(cmd, args);
-  if (r.status !== 0) throw subprocessError(`${what} failed (${cmd} exited ${r.status}).`, { lines: [`${what} failed (${cmd} exited ${r.status}).`, ...(r.stderr ? [r.stderr.trim().split("\n").pop()] : [])] });
+  if (r.status !== 0) throw subprocessError(`${what} failed (${cmd} exited ${r.status}).`, { lines: [`${what} failed (${cmd} exited ${r.status}).`, ...(r.stderr ? [safeLine(r.stderr.trim().split("\n").pop())] : [])] });
   return r;
 }
 // The installed daemon's own parser on the config install just wrote (`vbcdx-sidecar check` or
@@ -150,9 +150,17 @@ function enrollSidecar(sys, plan, token) {
   const [cmd, argv] = plan.scope === "system" ? ["runuser", ["-u", plan.user.name, "--", sys.path(bin), ...args]] : [sys.path(bin), args];
   const r = sys.run(cmd, argv, { input: Buffer.concat([token, Buffer.from("\n")]) });
   if (r.status !== 0) {
-    const said = r.stderr ? r.stderr.trim().split("\n").pop() : "";
+    const said = r.stderr ? safeLine(r.stderr.trim().split("\n").pop()) : "";
+    // The reader of a system-scope install is root, but the state directory the daemon checks is the
+    // unit user's, so a bare `enroll` as root fails that check and never replaces the identity. Name
+    // the runuser form this installer already uses, with the token on stdin: the redirect is read by
+    // root, and `--token-file` would refuse a file root owns when the daemon runs as the unit user.
+    const enrollAs = `${sys.path(bin)} ${args.join(" ")} --force < <token-file>`;
+    const remedy = plan.scope === "system" ? `sudo runuser -u ${plan.user.name} -- ${enrollAs}` : enrollAs;
     const line = `vbcdx-sidecar enroll exited ${r.status}; nothing was started.${r.status === 5
-      ? " An enrolled sidecar is refused: re-enroll it by hand with vbcdx-sidecar enroll --force." : ""}`;
+      ? " An enrolled sidecar is refused: to replace its identity, get a new one-time token from a control-plane"
+        + " operator (minted on the control host with vbcdx-control sidecars enroll-token), then re-enroll with"
+        + ` ${remedy}. --force replaces the existing identity.` : ""}`;
     throw subprocessError(line, { lines: [line, ...(said ? [said] : [])] });
   }
   // `vbcdx-sidecar enroll` prints {"changed": true, "data": {"sidecar_id", "replaced", "state"}}
@@ -965,11 +973,11 @@ const PUBLIC_RECORD_MAX = 4096;
  */
 export function systemSidecar(sys, instance) {
   if (!INSTANCE_RE.test(instance)) throw configError("--instance is 1-32 of a-z, 0-9 and '-', starting with a letter or digit.");
-  const L0 = layout({ service: "sidecar", instance, version: "0", scope: "system", home: "/" });
-  const where = L0.publicRecord;
+  const first = layout({ service: "sidecar", instance, version: "0", scope: "system", home: "/" });
+  const where = first.publicRecord;
   const untrusted = (why) => filesystemError(`${where} ${why}, so it isn't trusted; a system install writes it root-owned 0640 root:vbcdx. `
     + "Ask root to reinstall: vbcdx install service sidecar.");
-  for (const dir of [PROFILES.sidecar.confRoot, L0.confDir]) {
+  for (const dir of [PROFILES.sidecar.confRoot, first.confDir]) {
     let st;
     try {
       st = lstatSync(sys.path(dir));
@@ -1276,15 +1284,16 @@ export function serviceAction(sys, rec, action, { follow = false } = {}) {
 /**
  * `vbcdx config service <svc> …`: run this instance's own vbcdx-svc as `vbcdx-svc <svc> …`. `argv`
  * starts at the service name; the secret scan has already run on the whole command line. It runs
- * on the installer's own terminal and environment (`inherit`: stdin, stdout and stderr are
- * vbcdx-svc's, and the exit code is its own).
+ * on the installer's own terminal (`inherit`: stdin, stdout and stderr are vbcdx-svc's, and the
+ * exit code is its own), with the caller's VBCDX_* settings (`vbcdxEnv`).
  */
 export function configExec(sys, rec, argv) {
   const svc = rec.binaries.find((b) => b.name === "vbcdx-svc");
   if (!svc) throw conflictError("This install has no vbcdx-svc binary.");
   const bin = sys.path(svc.path);
   if (hashOf(bin) !== svc.sha256) throw conflictError("vbcdx-svc does not match what install wrote: run vbcdx doctor --service sidecar.");
-  return sys.run(bin, argv, { inherit: true }).status;
+  // The user's own command: it gets the caller's VBCDX_* settings, which no other command does.
+  return sys.run(bin, argv, { inherit: true, vbcdxEnv: true }).status;
 }
 
 /**

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "name": "dispatch",
+  "sidecar_prefix": "/dispatch/v1",
+  "routes": [
+    {
+      "op": "dispatch.messages.send",
+      "method": "POST",
+      "path": "orgs/{org}/workspaces/{ws}/messages",
+      "agent": true
+    },
+    {
+      "op": "dispatch.messages.list",
+      "method": "GET",
+      "path": "orgs/{org}/workspaces/{ws}/messages",
+      "agent": true
+    },
+    {
+      "op": "dispatch.deliveries.list",
+      "method": "GET",
+      "path": "orgs/{org}/workspaces/{ws}/deliveries",
+      "agent": true
+    },
+    {
+      "op": "dispatch.deliveries.ack",
+      "method": "POST",
+      "path": "orgs/{org}/workspaces/{ws}/deliveries/{delivery_id}/ack",
+      "agent": true
+    }
+  ],
+  "ack": "dispatch.deliveries.ack"
+}

@@ -367,6 +367,10 @@ test("config service sidecar … runs the recorded vbcdx-svc as `vbcdx-svc sidec
   assert.ok(!h.sys.calls.at(-1).includes("config") && !h.sys.calls.at(-1).includes("service"), "the config service prefix is never passed");
   // On the installer's own terminal: vbcdx-svc's stdout and stderr are the command's.
   assert.equal(h.sys.opts.at(-1).inherit, true, "configExec runs vbcdx-svc with inherit");
+  // The caller's VBCDX_* (it can carry tokens) goes to the user's own vbcdx-svc and to no other
+  // command the install or this one ran.
+  assert.equal(h.sys.opts.at(-1).vbcdxEnv, true, "configExec passes the caller's VBCDX_*");
+  assert.ok(h.sys.opts.length > 1 && h.sys.opts.slice(0, -1).every((o) => !o.vbcdxEnv), "only configExec asks for VBCDX_*");
   writeFileSync(at(h, "/usr/local/lib/vbcdx/sidecar/0.1.0/vbcdx-svc"), "#!/bin/sh\necho swapped\n");
   assert.throws(() => runService(parseServiceArgs(argv), h.deps), (e) => e.code === 5 && /does not match/.test(e.message));
   const none = host();
@@ -1413,7 +1417,7 @@ test("when starting the previous version fails too, the error says so and stays 
     && e.details.lines.at(-1).startsWith("Starting 0.1.0 again failed too"));
 });
 
-// Round 3 (PR review 109369, item 3): a failed fresh install has no previous version to start.
+// A failed fresh install has no previous version to start.
 test("a failed fresh install never restarts a previous version: no reset-failed or restart, daemon-reload last", () => {
   const h = scripted({ script: () => ({ state: "failed", restarts: "0" }) });
   assert.throws(() => install(h, release()), (e) => e.code === 6 && /did not start/.test(e.message) && !/again failed/.test(e.message));
@@ -1422,7 +1426,7 @@ test("a failed fresh install never restarts a previous version: no reset-failed 
   assert.deepEqual(ctl.slice(-2), ["disable --now vbcdx-sidecar-default.service", "daemon-reload"]);
 });
 
-// Round 3 (PR review 109369, item 2): an instance installed with --service none has a record but
+// An instance installed with --service none has a record but
 // no unit. A reinstall with a unit is that unit's first install: a failed start disables it, and
 // nothing restarts a previous unit that never existed.
 test("a --service none instance reinstalled with a unit that fails: the unit is disabled and removed, nothing restarted after", () => {
@@ -1477,7 +1481,7 @@ test("the daemon's line is made safe where it is read: no escapes, controls or b
   assert.equal(safeLine("vbcdx-sidecar: tcp 127.0.0.1:7777: address in use"), "vbcdx-sidecar: tcp 127.0.0.1:7777: address in use", "an ordinary line is unchanged");
 });
 
-// Round 3 (PR review 109369, item 1): `_` is a word character, so a secret's name with a prefix
+// `_` is a word character, so a secret's name with a prefix
 // (api_key, access_token, DB_PASSWORD) must be redacted whole, with a short value too.
 test("a key=value secret whose name has a prefix is redacted too; other key=value pairs stay", () => {
   const out = safeLine("vbcdx-sidecar: api_key=short access_token=tok1 client_secret=cs1 DB_PASSWORD=pw1 AUTH_TOKEN=at1 apikey=ak1 --token=t2 listen=127.0.0.1:7777 state=/var/lib/vbcdx/default");

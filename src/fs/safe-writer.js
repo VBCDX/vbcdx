@@ -1,18 +1,17 @@
 // Shared safe writer (spec section 9).
 //
-// Every managed mutation in the installer — generated definitions, credential
-// files, staged plans, the manifest — goes through this module. It is the one
-// place that enforces path safety, ownership, permissions, atomicity, and
-// locking, so no caller can accidentally follow a symlink, widen a secret's
-// mode, or leave a half-written file behind.
+// Every managed mutation in the installer — generated definitions, staged plans,
+// the manifest — goes through this module. It is the one place that enforces path
+// safety, ownership, permissions, atomicity, and locking, so no caller can
+// accidentally follow a symlink or leave a half-written file behind. It writes no
+// credential file: the installer has none to write.
 //
 // Guarantees:
 //   * No path component of a managed destination is a symlink (checked before
 //     and again at mutation time to defeat TOCTOU swaps).
-//   * Existing regular targets are owned by the effective user; secret files
-//     additionally require 0600 in a 0700 parent, and the restrictive mode is
-//     applied to the temp file BEFORE any secret content is written. These
-//     checks read an OPEN DESCRIPTOR (fstat) opened O_NOFOLLOW, not a re-resolved
+//   * Existing regular targets are owned by the effective user, and a file's mode is
+//     applied to the temp file BEFORE any content is written. The ownership check
+//     reads an OPEN DESCRIPTOR (fstat) opened O_NOFOLLOW, not a re-resolved
 //     path, so the object validated is provably the object opened (TOCTOU-safe).
 //   * Writes are atomic: content goes to a same-directory temp file, is fsynced
 //     and renamed over the destination. A failure cleans up its temp file.
@@ -88,87 +87,6 @@ export function ensureDir(absDir, mode = 0o755) {
 }
 
 /**
- * Create a private credentials directory and force its mode to exactly 0700
- * when THIS call creates it, so the process umask cannot leave it without the
- * owner-execute bit the 0700 contract requires (the exact-mode precedent
- * for files is). An EXISTING directory is left untouched: the credential
- * pre-check must still see and refuse a non-private one, so forcing the
- * mode here would mask exactly the failure that check exists for.
- */
-export function ensurePrivateCredentialDir(absDir) {
-  if (existsSync(absDir)) return;
-  assertNoSymlinkComponents(absDir);
-  // mkdirSync's mode is umask-masked, and a recursive mkdir descends into the
-  // masked ancestor it just created — under umask 0177 that ancestor is 0600
-  // (no owner-execute), so the recursion wedges with EACCES and reproduces
-  // the same symptom one level up (the documented layout has a
-  // not-yet-existing parent). Create the missing chain ONE component at a
-  // time, oldest first, forcing 0700 through a descriptor before descending —
-  // the exact-mode precedent is the one for files.
-  const created = [];
-  for (let cur = absDir; !existsSync(cur); cur = dirname(cur)) {
-    created.push(cur);
-    if (dirname(cur) === cur) break;
-  }
-  for (const dir of created.reverse()) {
-    try {
-      mkdirSync(dir, { mode: 0o700 });
-    } catch (err) {
-      if (err && err.code === "EEXIST") continue; // created concurrently; leave it untouched
-      throw err;
-    }
-    let fd;
-    try {
-      fd = openSync(dir, fsc.O_RDONLY | fsc.O_DIRECTORY | fsc.O_NOFOLLOW);
-      fchmodSync(fd, 0o700);
-    } finally {
-      if (fd !== undefined) closeSync(fd);
-    }
-  }
-}
-
-/**
- * Validate that `dir` is a real directory of mode 0700 owned by the effective
- * user, inspecting an OPEN DIRECTORY DESCRIPTOR (fstat) rather than re-resolving
- * the path with lstat. O_NOFOLLOW rejects a symlinked directory and O_DIRECTORY
- * rejects a non-directory atomically at open() — so a component swapped in after
- * an earlier path walk cannot redirect what we check (fd-based TOCTOU defence,
- * issue). `badModeMsg`/`badOwnerMsg` let each caller keep its own wording.
- */
-function validateSecretDir(dir, { badModeMsg, badOwnerMsg }) {
-  let fd;
-  try {
-    fd = openSync(dir, fsc.O_RDONLY | fsc.O_DIRECTORY | fsc.O_NOFOLLOW);
-  } catch (err) {
-    // A symlinked dir (ELOOP), a non-directory (ENOTDIR), an unreadable dir
-    // (EACCES — therefore not a readable 0700 dir) or an absent one (ENOENT)
-    // all fail the private-directory requirement.
-    if (err && ["ELOOP", "ENOTDIR", "EACCES", "ENOENT"].includes(err.code)) {
-      throw filesystemError(badModeMsg);
-    }
-    throw err;
-  }
-  try {
-    const st = fstatSync(fd);
-    if ((st.mode & 0o777) !== 0o700) throw filesystemError(badModeMsg);
-    if (st.uid !== process.getuid()) throw filesystemError(badOwnerMsg);
-    return st;
-  } finally {
-    closeSync(fd);
-  }
-}
-
-/**
- * The private-parent rule atomicWrite applies before writing a secret: a real 0700
- * directory owned by the effective user. Exported so the installer's pre-check can
- * apply the same rule before the first write.
- */
-export function assertPrivateCredentialDir(dir) {
-  const msg = `Credential directory must be a private 0700 dir owned by you: ${dir}`;
-  validateSecretDir(dir, { badModeMsg: msg, badOwnerMsg: msg });
-}
-
-/**
  * Map an open() failure from validateExistingFile's O_NOFOLLOW|O_NONBLOCK open
  * into the friendly symlink refusal, or return the error unchanged for the caller
  * to rethrow. Returns the error to throw rather than throwing so the mapping is a
@@ -191,8 +109,7 @@ export function symlinkRefusalFor(err, absPath) {
 
 /**
  * Validate an existing regular file for managed update/retention: it must be a
- * regular (non-symlink) file owned by the effective user. When `secret` is
- * true, require mode 0600 and a 0700 immediate parent. Returns the fstat.
+ * regular (non-symlink) file owned by the effective user. Returns the fstat.
  *
  * The file is opened O_RDONLY|O_NOFOLLOW and validated via fstat on that open
  * descriptor, not via a second lstat of the path: the object we check is
@@ -207,9 +124,9 @@ export function symlinkRefusalFor(err, absPath) {
  * waiting for a writer. O_NONBLOCK is a no-op for a regular file and makes a FIFO
  * (or a device with no reader) fail promptly, so the "Not a regular file" check
  * below is reached instead of the call hanging — matching the pre-fd lstat
- * behaviour. validateSecretDir dodges this separately via O_DIRECTORY.
+ * behaviour.
  */
-export function validateExistingFile(absPath, { secret = false } = {}) {
+export function validateExistingFile(absPath) {
   requirePosix();
   assertNoSymlinkComponents(absPath);
   let fd;
@@ -223,17 +140,6 @@ export function validateExistingFile(absPath, { secret = false } = {}) {
     if (!st.isFile()) throw filesystemError(`Not a regular file: ${absPath}`);
     if (st.uid !== process.getuid()) {
       throw filesystemError(`File is not owned by the effective user: ${absPath}`);
-    }
-    if (secret) {
-      const perm = st.mode & 0o777;
-      if (perm !== 0o600) {
-        throw filesystemError(`Credential file must be mode 0600: ${absPath}`);
-      }
-      const parent = dirname(absPath);
-      validateSecretDir(parent, {
-        badModeMsg: `Credential directory must be mode 0700: ${parent}`,
-        badOwnerMsg: `Credential directory is not owned by the effective user: ${parent}`,
-      });
     }
     return st;
   } finally {
@@ -270,11 +176,10 @@ export function assertRegularDestination(existing, absPath) {
  * @param {string|Buffer} content
  * @param {object} [opts]
  * @param {number} [opts.mode=0o644] final file mode; applied to the temp file
- *   before content is written so a secret never briefly exists world-readable
- * @param {boolean} [opts.secret=false] enforce a private parent directory
+ *   before content is written, so a 0600 file never briefly exists world-readable
  * @returns {{digest: string, bytes: number}}
  */
-export function atomicWrite(absPath, content, { mode = 0o644, secret = false } = {}) {
+export function atomicWrite(absPath, content, { mode = 0o644 } = {}) {
   requirePosix();
   assertNoSymlinkComponents(absPath);
   const buf = Buffer.isBuffer(content) ? content : Buffer.from(String(content), "utf8");
@@ -289,17 +194,13 @@ export function atomicWrite(absPath, content, { mode = 0o644, secret = false } =
     existing = null;
   }
   assertRegularDestination(existing, absPath);
-  if (secret) {
-    // fd-based (fstat) re-check of the private parent directory.
-    assertPrivateCredentialDir(dir);
-  }
   const tmp = join(dir, `.vbcdx-tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   let fd;
   try {
     // O_EXCL: never follow/clobber an existing temp; create with the final mode.
     fd = openSync(tmp, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL, mode);
     // open()'s mode is masked by the process umask; set the declared mode exactly, so a
-    // 0644 definition is 0644 and a 0600 credential 0600 whatever the operator's umask.
+    // 0644 definition is 0644 and a 0600 config file 0600 whatever the operator's umask.
     fchmodSync(fd, mode);
     writeSync(fd, buf);
     fsyncSync(fd);
@@ -307,16 +208,31 @@ export function atomicWrite(absPath, content, { mode = 0o644, secret = false } =
     fd = undefined;
     renameSync(tmp, absPath);
   } catch (err) {
-    if (fd !== undefined) {
-      try { closeSync(fd); } catch { /* ignore */ }
-    }
-    try { unlinkSync(tmp); } catch { /* ignore: temp may not exist */ }
-    if (err && err.code && err.code.startsWith("E")) {
-      throw filesystemError(`Failed to write ${absPath}: ${err.code}.`);
-    }
-    throw err;
+    discardTemp(fd, tmp);
+    // Every call above raises an Error with a `code` starting with E: an fs errno (EACCES, EFBIG,
+    // EIO, ...) or a Node validation code (ERR_INVALID_ARG_TYPE, ...). So this is the only way out:
+    // a failed write is never reported as the success return below.
+    throw filesystemError(`Failed to write ${absPath}: ${err.code}.`);
   }
   return { digest: sha256(buf), bytes: buf.length };
+}
+
+/**
+ * Clean up after a failed write: close the descriptor if the failure left one open, then remove
+ * the temp file. The write already failed, so neither step may replace the error the caller is
+ * about to raise: a close of a descriptor that is already closed and an unlink of a temp that is
+ * already gone are both ignored.
+ *
+ * Both steps are real syscalls and each arm has a real input. An error after the descriptor was
+ * closed (`fd = undefined` before the rename) reaches the unlink with the temp still present; a
+ * failed open reaches it with no descriptor and no temp; and a descriptor closed twice or a temp
+ * removed twice fails with EBADF / ENOENT, which is swallowed here exactly as it must be.
+ */
+export function discardTemp(fd, tmp) {
+  if (fd !== undefined) {
+    try { closeSync(fd); } catch { /* ignore: the write already failed; this is cleanup */ }
+  }
+  try { unlinkSync(tmp); } catch { /* ignore: temp may not exist */ }
 }
 
 /**
@@ -396,7 +312,7 @@ export function digestOf(absPath) {
 // absent, and in a lock from before this format, only the PID is there: a live PID then counts
 // as the holder. Liveness is `kill(pid, 0)`, so this assumes every run that shares a lock is in
 // one PID namespace (a holder in another one would look dead).
-function procStart(pid) {
+export function procStart(pid) {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
     // The command (field 2) is in parentheses and may hold spaces; the fields after it are plain.
@@ -416,7 +332,7 @@ export function holderCommand(argv) {
   const words = at >= 0 ? ["vbcdx", ...argv.slice(at + 1).filter((a) => /^[a-z][a-z-]*$/.test(a)).slice(0, 4)] : [base(argv[0])];
   return words.join(" ").replace(/[\u0000-\u001f\u007f-\u009f]/g, "").slice(0, 80) || null;
 }
-function procCommand(pid) {
+export function procCommand(pid) {
   try {
     return holderCommand(readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean));
   } catch {
@@ -498,6 +414,22 @@ function removeOwn(lock, token) {
 }
 
 /**
+ * Remove the file a takeover renamed aside. It can no longer be the lock (it was renamed, so the
+ * lock path is free), and a removal can still fail for real: a directory at that path (unlink(2)
+ * refuses one with EISDIR), a mode change, an immutable bit set by an operator, an EIO or NFS
+ * fault, a concurrent run. The run can then go on, so this warns on stderr and leaves the file for
+ * the operator instead of failing the takeover. Every unlink(2) failure carries an errno (a bad
+ * argument becomes a Node ERR_* code), so the warning always names one.
+ */
+export function removeAside(aside) {
+  try {
+    unlinkSync(aside);
+  } catch (e) {
+    process.stderr.write(`warning: could not remove ${aside} (${e.code}); remove it by hand.\n`);
+  }
+}
+
+/**
  * Take over a stale lock, or say why not. Only one run takes over at a time: the takeover is done
  * under a second O_EXCL lock, `<lock>.takeover`, and the lock is judged again under it. A fresh
  * acquirer can't create the lock meanwhile (the stale file is still there), and no other taker
@@ -534,11 +466,7 @@ function takeOver(p, lock, token, hooks) {
       try { linkSync(aside, lock); unlinkSync(aside); } catch { /* the path was retaken: leave both */ }
       throw filesystemError(`The lock for ${p} changed during takeover; retry.`);
     }
-    try {
-      unlinkSync(aside);
-    } catch (e) {
-      process.stderr.write(`warning: could not remove ${aside} (${(e && e.code) || "error"}); remove it by hand.\n`);
-    }
+    removeAside(aside);
     return h;
   } finally {
     removeOwn(mutex, token);

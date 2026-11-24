@@ -269,10 +269,26 @@ test("a 0600 token file owned by someone else is refused: only the installing us
   assert.deepEqual(h.sys.calls, []);
 });
 
-test("a refused enroll undoes the install: config, unit and record are taken back; exit 5 gets the --force hint", () => {
+test("a refused enroll undoes the install: config, unit and record are taken back; exit 5 names a fresh token, not a bare --force", () => {
   const h = host({ enroll: () => ({ status: 5, stderr: "vbcdx-sidecar: this sidecar is already enrolled as sc_1; pass --force to enroll it again\n" }) });
   assert.throws(() => run(argv("sidecar", release(), ["--control-plane", CP, "--enroll-token-file", tokenFile()]), h), (e) => {
-    assert.match(e.message, /^vbcdx-sidecar enroll exited 5; nothing was started\. An enrolled sidecar is refused: re-enroll it by hand with vbcdx-sidecar enroll --force\.$/);
+    assert.match(e.message, /^vbcdx-sidecar enroll exited 5; nothing was started\. An enrolled sidecar is refused: to replace its identity, /);
+    // The remedy is executable: a fresh one-time token minted by an operator with the control plane's
+    // own command (the installer's own vocabulary, as the no-token refusal at apply.js:175 uses), then
+    // the sidecar's token input, with --force as the flag that replaces the identity.
+    assert.match(e.message, /get a new one-time token from a control-plane operator/);
+    assert.match(e.message, /vbcdx-control sidecars enroll-token/);
+    // The remedy has to be executable by the reader the install addresses: root. The sidecar's state
+    // directory belongs to the unit user, so a bare enroll as root fails its ownership check and
+    // replaces nothing; the message names the runuser form the installer itself uses, with the token
+    // on stdin (root's shell reads the file, the daemon reads stdin).
+    assert.match(e.message, /then re-enroll with sudo runuser -u vbcdx -- \S*vbcdx-sidecar enroll --instance default --instance-dir \/etc\/vbcdx\/default --token-stdin --force < <token-file>/);
+    assert.ok(!e.message.includes("--token-file <file>"), "the root-unusable --token-file form is gone");
+    assert.match(e.message, /--token-stdin/);
+    assert.match(e.message, /--force replaces the existing identity/);
+    // Not the old bare invitation: the reader was told to run enroll --force with no token to pass.
+    assert.ok(!e.message.includes("re-enroll it by hand with vbcdx-sidecar enroll --force"), e.message);
+    assert.ok(!/\benroll --force\b/.test(e.message), e.message);
     assert.ok(!errorText(e).includes("CANARY"));
     return true;
   });
@@ -283,6 +299,27 @@ test("a refused enroll undoes the install: config, unit and record are taken bac
   const other = host({ enroll: () => ({ status: 69, stderr: "vbcdx-sidecar: control plane unreachable\n" }) });
   assert.throws(() => run(argv("sidecar", release(), ["--control-plane", CP, "--enroll-token-stdin"]), other),
     /vbcdx-sidecar enroll exited 69; nothing was started\.$/);
+});
+
+test("a failing command's stderr reaches the error only through safeLine: no secret-shaped text is shown", () => {
+  // A key=value secret and a long token-shaped run in the failing command's last stderr line.
+  const long = "Z9".repeat(20);
+  const said = `vbcdx-sidecar: refused: password=CANARYPW ${long}\n`;
+  const hidden = (e) => {
+    assert.ok(!errorText(e).includes("CANARYPW") && !errorText(e).includes(long), errorText(e));
+    assert.ok(errorText(e).includes("password=[redacted]"), errorText(e));
+    return true;
+  };
+  // The enroll step (the daemon's stderr right after it read the token on stdin).
+  const refused = host({ enroll: () => ({ status: 69, stderr: said }) });
+  assert.throws(() => run(argv("sidecar", release(), ["--control-plane", CP, "--enroll-token-file", tokenFile()]), refused), hidden);
+  // A systemctl step (every unit command goes through the same check).
+  const failing = host();
+  const orig = failing.sys.run;
+  failing.sys.run = (cmd, args, o) => (cmd === "systemctl" && args.includes("enable")
+    ? (failing.sys.calls.push([cmd, ...args]), { status: 1, stdout: "", stderr: said })
+    : orig(cmd, args, o));
+  assert.throws(() => run(argv("sidecar", release(), ["--control-plane", CP, "--enroll-token-file", tokenFile()]), failing), hidden);
 });
 
 test("a failure after a successful enroll removes the new credentials and names the spent id to revoke", () => {
@@ -512,7 +549,7 @@ test("a token-only run whose restart doesn't stay up: the enroll's error (revoke
   assert.throws(() => run(argv("sidecar", rel, ["--control-plane", CP, "--enroll-token-file", tokenFile()]), h),
     (e) => e.code === 6 && /did not start/.test(e.message) && /Revoke it on the control host \(vbcdx-control sidecars revoke sc_7f3 --yes\)/.test(e.message));
   assert.ok(!existsSync(at(h, `${h.stateDir}/tunnel`)), "the tunnel credentials this run wrote are gone");
-  // Round 3 (PR review 109369, item 4): the token-only path writes no unit or config, so it has
+  // The token-only path writes no unit or config, so it has
   // nothing to daemon-reload or put back. Its one systemctl call is the restart (then the wait's
   // polls): never a disable, and the unit is as it was.
   const ctl = h.sys.calls.slice(mark).filter((c) => c[0] === "systemctl" && !isPoll(c)).map((c) => c.slice(1).join(" "));

@@ -8,9 +8,7 @@
   "env": [
     { "name": "EXAMPLE_TRACKER_URL", "description": "Origin of the tracker instance the tools call.", "kind": "config", "required": true },
     { "name": "EXAMPLE_TRACKER_WRITES", "description": "off, write or full; off by default.", "kind": "config", "required": false },
-    { "name": "EXAMPLE_TRACKER_TOKEN", "description": "API token for the tracker; never written inline.", "kind": "credential", "required": false },
     { "name": "EXAMPLE_TRACKER_HTTP_PORT", "description": "Listen port for serve mode.", "kind": "config", "required": false, "modes": ["http"] }
   ],
-  "credential_file": { "argument": "credential_file" },
   "manifest": { "args": ["manifest"] }
 }

@@ -14,7 +14,7 @@
 // One role's prompt is composed in this order: the core prompt with its slots filled, then
 // each overlay's all.md and roles/<id>.md in overlay order; variables are expanded over the
 // whole result in one pass, so a value is never expanded again. The renderers then add the
-// credential-binding note and the git note as before. With no overlay a prompt with no slot
+// bound-tools note and the git note as before. With no overlay a prompt with no slot
 // and no variable is returned unchanged, so a pack that uses neither renders exactly as it
 // did. Every rule is checked up front: an unknown pack, role, slot or variable, a malformed
 // declaration or an empty file fails by name before anything is written.

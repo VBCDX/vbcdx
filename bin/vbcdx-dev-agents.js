@@ -8,7 +8,7 @@
 //   vbcdx-dev-agents --help
 //   vbcdx-dev-agents --version
 //
-// Exit codes follow the spec taxonomy: 0 ok; 2 CLI/config; 3 credential;
+// Exit codes follow the spec taxonomy: 0 ok; 2 CLI/config; 3 not used;
 // 4 filesystem; 5 conflict/scope/dependency; 6 native subprocess.
 
 import { init, packageVersion } from "../src/index.js";
@@ -66,7 +66,6 @@ function printReport(report) {
   // Files the installer wrote that this render no longer produces.
   for (const r of report.removals) lines.push(L`  removal ${r.role}: ${r.action} -> ${r.destination}`);
   if (report.removals.length) lines.push(L`  removals: ${report.removals.length} file(s) the installer wrote that this render no longer produces`);
-  for (const c of report.credentials) lines.push(L`  credential ${c.service ? `${c.role}/${c.service}` : c.role}: ${c.action}` + (c.unknown ? " (unknown role)" : ""));
   if (report.integrations && report.integrations.length) lines.push(L`  integrations bound (offline): ${report.integrations.join(", ")} — runtime registration unverified`);
   // Provenance: each locked source's origin and the commit it resolved to.
   for (const s of report.sources || []) {
@@ -106,17 +105,11 @@ async function main() {
     if (!quiet) out(printReport(report) + "\n");
     // Warnings, conflicts, skips, and pending states are never suppressed.
     for (const w of report.warnings) errOut(L`warning: ${w}` + "\n");
-    // A dry run that finds conflicts or bad credential files exits as the real run
-    // would: the real run refuses conflicts first, so that code wins.
-    const credErrors = report.credential_errors || [];
-    if (credErrors.length) {
-      errOut(errorText([`${credErrors.length} existing credential file(s) would be refused (these fail even with --force):`, ...credErrors.map((e) => `  ${e}`)]));
-    }
+    // A dry run that finds conflicts exits as the real run would.
     if (report.conflicts && report.conflicts.length) {
       errOut(errorText([`${report.conflicts.length} file(s) would be refused as modified outside the installer or not package-owned (rerun with --force to replace them):`, ...conflictLines(report.conflicts, report.conflict_notes)]));
       return EXIT.CONFLICT;
     }
-    if (credErrors.length) return EXIT.CREDENTIAL;
     return EXIT.OK;
   } catch (err) {
     errOut(errorText(errorLines(err)));
@@ -126,7 +119,9 @@ async function main() {
 }
 
 main().then((code) => process.exit(code), (err) => {
-  // A bug: the message is one escaped value; the stack frames are this package's own.
+  // A bug: the message is one escaped value; the stack frames are this package's own. Keep:
+  // the only redaction on the crash path, reached when --version's packageVersion() reads a
+  // damaged package.json.
   const frames = err && err.stack ? String(err.stack).split("\n").filter((l) => /^\s+at /.test(l)) : [];
   errOut([L`fatal: ${redactTyped(err && err.message ? err.message : String(err), ARGV)}`, ...frames.map((f) => L`${f}`)].join("\n") + "\n");
   process.exit(1);

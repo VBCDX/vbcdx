@@ -4,16 +4,19 @@
 // resolves the installer's own directories and the selected harness root, and
 // validates configured paths and the optional informational code-host URL.
 // Unknown VBCDX_AGENTS_* keys fail (to catch typos); unrelated keys are ignored
-// without logging their values. VBCDX_AGENTS_WORKDIR is reserved and rejected
+// without logging their values. The per-role credential keys an earlier version read
+// (VBCDX_AGENTS_USER|TOKEN|PASSWORD_<ROLE>…) are refused by name: a tool's key lives in
+// Keyhole and reaches the tool through the sidecar, never through a file this installer
+// writes. VBCDX_AGENTS_WORKDIR is reserved and rejected
 // when nonblank. Ambient environment variables are never used as defaults.
 
-import { isAbsolute } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { configError } from "../errors.js";
 import { normalizeSuffix } from "../roles/registry.js";
 import { isKnownRole } from "../roles/index.js";
 import { hasActiveCatalog } from "../packs/catalog.js";
 
-const HARNESS_ROOT_KEY = {
+export const HARNESS_ROOT_KEY = {
   claude: "VBCDX_AGENTS_CLAUDE_CONFIG_DIR",
   codex: "VBCDX_AGENTS_CODEX_HOME",
   opencode: "VBCDX_AGENTS_OPENCODE_CONFIG_DIR",
@@ -44,7 +47,9 @@ const SCALAR_KEYS = new Set([
   "VBCDX_AGENTS_WORKDIR",
 ]);
 
-const CREDENTIAL_KEY_RE = /^VBCDX_AGENTS_(USER|TOKEN|PASSWORD)_.+$/;
+// The per-role credential keys of earlier versions. Refused whatever their value, which is
+// never looked at: the refusal names the keys only.
+const REMOVED_CREDENTIAL_KEY_RE = /^VBCDX_AGENTS_(USER|TOKEN|PASSWORD)_.+$/;
 // Optional per-role Hermes model override: VBCDX_AGENTS_HERMES_MODEL_<SUFFIX>.
 const HERMES_ROLE_MODEL_RE = /^VBCDX_AGENTS_HERMES_MODEL_(.+)$/;
 const PATH_KEYS = new Set([
@@ -103,10 +108,16 @@ export function validateServiceUrl(key, value) {
  * @returns {object} config
  */
 export function loadConfig(entries, { harness, scope }) {
+  const removed = [...entries.keys()].filter((key) => REMOVED_CREDENTIAL_KEY_RE.test(key));
+  if (removed.length) {
+    throw configError(
+      `Credential files are no longer written; remove these keys from the configuration file: ${removed.join(", ")}. ` +
+        "Put each key in Keyhole and grant the tool (README, \"How a tool gets its key\").",
+    );
+  }
   for (const key of entries.keys()) {
     if (!key.startsWith("VBCDX_AGENTS_")) continue; // unrelated key: ignored, value not logged
     if (SCALAR_KEYS.has(key)) continue;
-    if (CREDENTIAL_KEY_RE.test(key)) continue;
     if (HERMES_ROLE_MODEL_RE.test(key)) continue;
     throw configError(`Unsupported configuration key ${key}. Check for a typo; unknown VBCDX_AGENTS_ keys are rejected.`);
   }
@@ -127,8 +138,11 @@ export function loadConfig(entries, { harness, scope }) {
 
   const baseDir = entries.get("VBCDX_AGENTS_BASE_DIR");
   if (!baseDir) throw configError("VBCDX_AGENTS_BASE_DIR is required.");
-  const credentialsDir = entries.get("VBCDX_AGENTS_CREDENTIALS_DIR");
-  if (!credentialsDir) throw configError("VBCDX_AGENTS_CREDENTIALS_DIR is required.");
+  // Where an earlier version wrote per-role credential files. Nothing is written or read
+  // there now: the directory is only listed, so `doctor` and `install agent` can report
+  // files left behind (src/install/legacy-credentials.js). The key is optional and no
+  // longer documented; without it the old default under the base directory is used.
+  const legacyCredentialsDir = entries.get("VBCDX_AGENTS_CREDENTIALS_DIR") || join(baseDir, "credentials");
 
   // The selected harness root is required for user scope; project scope uses
   // the containing worktree instead.
@@ -150,7 +164,7 @@ export function loadConfig(entries, { harness, scope }) {
     hermes,
     hermesWebSearch,
     baseDir,
-    credentialsDir,
+    legacyCredentialsDir,
     harnessRoot,
     codeHostUrl: entries.get("VBCDX_AGENTS_CODE_HOST_URL") || null,
     integrationsFile: entries.get("VBCDX_AGENTS_INTEGRATIONS_FILE") || null,

@@ -19,10 +19,17 @@ import { resolveContext } from "../src/install/context.js";
 import { installTool, installAgent, installSkill, list, remove, doctor } from "../src/install/commands.js";
 import { resolveToolPackage, runToolManifest } from "../src/install/tool-package.js";
 import { checkedEdit, FORMATS } from "../src/install/config-entry.js";
+import { readPack } from "../src/packs/load.js";
+import { buildCatalog, setActiveCatalog } from "../src/packs/catalog.js";
 import { parseVbcdxArgs, printable, printableValue } from "../src/install/args.js";
 import { readManifest } from "../src/fs/manifest.js";
 import { EXIT } from "../src/errors.js";
-import { FIXTURE_IDS, FIXTURE_SKILLS_DIR, PACK_ARG } from "./helpers/fixture-pack.js";
+import { FIXTURE_IDS, FIXTURE_PACK_DIR, FIXTURE_SKILLS_DIR, PACK_ARG } from "./helpers/fixture-pack.js";
+
+// The integrations file is read only if no one but its owner can change it (and its
+// directory too), and these tests write theirs with the default mode. Pin the umask a
+// CI runner has, so a host whose umask is 002 (user private groups) runs them the same.
+process.umask(0o022);
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -31,7 +38,7 @@ const FIXTURE_BIN = join(FIXTURE, "bin", "example-tracker");
 const SERVER = "example-tracker";
 // The fixture's stdio settings: EXAMPLE_TRACKER_HTTP_PORT is read only in http mode ("modes": ["http"]),
 // so no harness entry that starts the stdio server carries it.
-const ENV_NAMES = ["EXAMPLE_TRACKER_URL", "EXAMPLE_TRACKER_WRITES", "EXAMPLE_TRACKER_TOKEN"];
+const ENV_NAMES = ["EXAMPLE_TRACKER_URL", "EXAMPLE_TRACKER_WRITES"];
 
 function scratch() {
   return mkdtempSync(join(tmpdir(), "vbcdx-95-"));
@@ -66,25 +73,13 @@ const readJson = (p) => JSON.parse(read(p));
 // prototypes, so normalise a parsed TOML value to plain objects before comparing it
 // with an object literal.
 const plain = (v) => JSON.parse(JSON.stringify(v));
-// A credential file the way the installer writes one: 0600, in 0700 directories.
-function writeCred(credentialsDir, rel, body) {
-  const file = join(credentialsDir, rel);
-  for (let d = dirname(file); d.startsWith(credentialsDir); d = dirname(d)) {
-    mkdirSync(d, { recursive: true });
-    chmodSync(d, 0o700);
-    if (d === credentialsDir) break;
-  }
-  writeFileSync(file, body);
-  chmodSync(file, 0o600);
-  return file;
-}
-
 // A full tool manifest for service forgejo, as the strict validator wants.
 const fullManifest = (names) => ({ schema_version: 1, service: "forgejo", contract: "vbcdx.forgejo/1", package_version: "0.0.1",
   tools: [...names].sort().map((n) => ({ name: n, description: "d", inputSchema: {}, outputSchema: {}, effect: "read", required_permissions: [] })) });
 
 // A forgejo-shaped tool package: server_name forgejo is in the roles' reviewed allowlists.
-function forgejoPackage(dir, { credentialFile = true } = {}) {
+// It asks for no key, as every tool package `install tool` accepts.
+function forgejoPackage(dir) {
   mkdirSync(join(dir, "bin"), { recursive: true });
   writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "@example/forgejo-like", version: "0.0.1", bin: { "fj-tool": "bin/fj-tool.js" } }));
   const decl = {
@@ -92,7 +87,6 @@ function forgejoPackage(dir, { credentialFile = true } = {}) {
     env: [{ name: "FJ_URL", description: "Forge origin.", kind: "config", required: true }],
     manifest: { args: ["manifest"] },
   };
-  if (credentialFile) decl.credential_file = { argument: "credential_file" };
   writeFileSync(join(dir, "vbcdx.json"), JSON.stringify(decl));
   writeFileSync(join(dir, "bin", "fj-tool.js"),
     `if (process.argv[2] === "manifest") console.log(${JSON.stringify(JSON.stringify(fullManifest(["get_issue", "whoami", "zzz_not_allowlisted"])))});\n`);
@@ -114,7 +108,6 @@ test("claude user scope: ~/.claude.json mcpServers.<name> = {type: stdio, comman
         env: {
           EXAMPLE_TRACKER_URL: "${EXAMPLE_TRACKER_URL}",
           EXAMPLE_TRACKER_WRITES: "${EXAMPLE_TRACKER_WRITES:-}",
-          EXAMPLE_TRACKER_TOKEN: "${EXAMPLE_TRACKER_TOKEN:-}",
         },
       },
     },
@@ -174,8 +167,8 @@ test("hermes: <HERMES_HOME>/config.yaml mcp_servers.<name> = {command, args, env
 }));
 
 test("no environment value is ever written: only references, even when the variable is set", () => withHome((home) => {
-  const before = process.env.EXAMPLE_TRACKER_TOKEN;
-  process.env.EXAMPLE_TRACKER_TOKEN = "sekret-token-value-0123456789";
+  const before = process.env.EXAMPLE_TRACKER_URL;
+  process.env.EXAMPLE_TRACKER_URL = "https://tracker.example/sekret-token-value-0123456789";
   try {
     for (const h of ["claude", "codex", "opencode", "hermes"]) {
       const r = installTool(ctxFor(h, home), FIXTURE);
@@ -183,8 +176,8 @@ test("no environment value is ever written: only references, even when the varia
     }
     assert.equal(read(join(home, ".vbcdx", "manifests", "installation.json")).includes("sekret-token-value"), false);
   } finally {
-    if (before === undefined) delete process.env.EXAMPLE_TRACKER_TOKEN;
-    else process.env.EXAMPLE_TRACKER_TOKEN = before;
+    if (before === undefined) delete process.env.EXAMPLE_TRACKER_URL;
+    else process.env.EXAMPLE_TRACKER_URL = before;
   }
 }));
 
@@ -222,7 +215,7 @@ test("remove deletes a file the installer created and nothing else is in", () =>
 }));
 
 test("two tools in one installer-created file: removing both deletes it, in either order", () => withHome((home) => {
-  const second = forgejoPackage(join(home, "fj"), { credentialFile: false });
+  const second = forgejoPackage(join(home, "fj"));
   for (const h of ["claude", "codex", "opencode", "hermes"]) {
     for (const order of [[SERVER, "forgejo"], ["forgejo", SERVER]]) {
       const file = installTool(ctxFor(h, home), FIXTURE).file;
@@ -236,7 +229,7 @@ test("two tools in one installer-created file: removing both deletes it, in eith
 }));
 
 test("two tools in a file the user created: removing both leaves the file, in either order", () => withHome((home) => {
-  const second = forgejoPackage(join(home, "fj"), { credentialFile: false });
+  const second = forgejoPackage(join(home, "fj"));
   const file = join(home, ".claude.json");
   for (const order of [[SERVER, "forgejo"], ["forgejo", SERVER]]) {
     writeFileSync(file, JSON.stringify({ numStartups: 1 }));
@@ -298,7 +291,7 @@ test("an edit that changes anything outside the entry is refused", () => {
   assert.equal(checkedEdit("json", onDisk, path, () => FORMATS.json.set(text, path, 1), true, 1), FORMATS.json.set(text, path, 1));
 });
 
-test("an edit that does not leave the entry exactly as rendered is refused (review finding 2)", () => {
+test("an edit that does not leave the entry exactly as rendered is refused", () => {
   const text = '{"mcpServers": {}}';
   const onDisk = { doc: JSON.parse(text) };
   const path = ["mcpServers", "x"];
@@ -334,7 +327,7 @@ test("a config file that existed before install is never deleted by remove, even
   assert.deepEqual(readJson(file), {});
 }));
 
-test("install tool refuses a declaration that carries a token in its args and writes nothing (review finding 1)", () => withHome((home) => {
+test("install tool refuses a declaration that carries a token in its args and writes nothing", () => withHome((home) => {
   const pkg = join(home, "evil");
   cpSync(FIXTURE, pkg, { recursive: true });
   const decl = readJson(join(pkg, "vbcdx.json"));
@@ -349,13 +342,13 @@ test("install tool refuses a declaration that carries a token in its args and wr
 // A tool package whose manifest command leaves a marker file, so a test can tell whether
 // the package's code ran.
 function markerPackage(dir, marker) {
-  forgejoPackage(dir, { credentialFile: false });
+  forgejoPackage(dir);
   writeFileSync(join(dir, "bin", "fj-tool.js"),
     `require("fs").writeFileSync(${JSON.stringify(marker)}, "ran"); console.log(${JSON.stringify(JSON.stringify(fullManifest(["whoami"])))});\n`);
   return dir;
 }
 
-test("--dry-run never runs the package's manifest command (review finding 3)", () => withHome((home) => {
+test("--dry-run never runs the package's manifest command", () => withHome((home) => {
   const marker = join(home, "ran");
   const pkg = markerPackage(join(home, "fj"), marker);
   for (const h of ["claude", "codex", "opencode", "hermes"]) {
@@ -423,77 +416,24 @@ test("install agent binds a role to installed tools through its reviewed allowli
   const def = read(join(home, ".claude", "agents", "review-agent.md"));
   assert.match(def, /mcp__forgejo__get_issue, mcp__forgejo__whoami/);
   assert.equal(def.includes("zzz_not_allowlisted"), false, "a tool outside the allowlist is never bound");
-  // The role's own file for this tool, not one file for every tool.
-  assert.ok(def.includes(`credential_file="${join(home, ".vbcdx", "credentials", "review-agent", "forgejo.env")}"`));
-  assert.ok(r.warnings.some((w) => /create .*review-agent\/forgejo\.env with VBCDX_AGENTS_USER and VBCDX_AGENTS_TOKEN or VBCDX_AGENTS_PASSWORD \(or set VBCDX_AGENTS_TOKEN_REVIEW_AGENT__FORGEJO/.test(w)), r.warnings.join("\n"));
-  assert.equal(r.warnings.some((w) => /no longer read/.test(w)), false, "no legacy file, no legacy hint");
+  // The role is told its tools, and nothing about a credential: none is created, asked for or warned about.
+  assert.match(def, /## Bound service tools\n\n- `forgejo`: tools available to your role: get_issue, whoami\.\n/);
+  assert.doesNotMatch(def, /credential/);
+  assert.deepEqual(r.warnings, []);
+  assert.equal("credentials" in r, false);
+  assert.equal(existsSync(join(home, ".vbcdx", "credentials")), false);
   assert.equal(installAgent(ctxFor("claude", home), ["review-agent"]).generated[0].action, "noop");
 }));
 
-test("a role is bound before its credential file exists, and doctor reports the file missing until it does", () => withHome((home) => {
-  const pkg = forgejoPackage(join(home, "fj"));
-  installTool(ctxFor("claude", home), pkg);
-  installAgent(ctxFor("claude", home), ["review-agent"]);
-  const creds = join(home, ".vbcdx", "credentials");
-  const file = join(creds, "review-agent", "forgejo.env");
-  const env = { FJ_URL: "x" };
-  const check = (rep) => rep.tools[0].checks.find((c) => c.check === "credential file review-agent");
-  let rep = doctor(ctxFor("claude", home), { env });
-  assert.equal(check(rep).ok, false);
-  assert.equal(check(rep).detail,
-    `${file} missing: forgejo calls as review-agent fail until it exists with VBCDX_AGENTS_USER and VBCDX_AGENTS_TOKEN or VBCDX_AGENTS_PASSWORD`);
-  assert.equal(rep.ok, false);
-  writeCred(creds, join("review-agent", "forgejo.env"), "");
-  rep = doctor(ctxFor("claude", home), { env });
-  assert.equal(check(rep).ok, false, "an empty file is not a credential");
-  assert.match(check(rep).detail, /forgejo\.env is empty: it needs VBCDX_AGENTS_USER and/);
-  writeCred(creds, join("review-agent", "forgejo.env"), 'VBCDX_AGENTS_ROLE="review-agent"\nVBCDX_AGENTS_TOKEN="t"\n');
-  rep = doctor(ctxFor("claude", home), { env });
-  assert.equal(check(rep).ok, false, "the Forgejo contract needs a user");
-  assert.equal(check(rep).detail, `${file} is invalid: missing VBCDX_AGENTS_USER`);
-  writeCred(creds, join("review-agent", "forgejo.env"), 'VBCDX_AGENTS_ROLE="pm-agent"\nVBCDX_AGENTS_USER="u"\nVBCDX_AGENTS_TOKEN="t"\n');
-  rep = doctor(ctxFor("claude", home), { env });
-  assert.equal(check(rep).ok, false, "another role's file is not this role's credential");
-  assert.match(check(rep).detail, /is invalid: role field does not match the expected role review-agent/);
-  writeCred(creds, join("review-agent", "forgejo.env"), 'VBCDX_AGENTS_ROLE="review-agent"\nVBCDX_AGENTS_USER="u"\nVBCDX_AGENTS_TOKEN="t"\n');
-  chmodSync(file, 0o644);
-  rep = doctor(ctxFor("claude", home), { env });
-  assert.equal(check(rep).ok, false, "a world-readable file is unsafe");
-  assert.match(check(rep).detail, /is unsafe: /);
-  chmodSync(file, 0o600);
-  rep = doctor(ctxFor("claude", home), { env });
-  assert.equal(check(rep).ok, true, check(rep).detail);
-  assert.equal(check(rep).detail, file);
-  assert.equal(rep.ok, true);
-  assert.equal(JSON.stringify(rep).includes('"t"'), false);
-}));
-
-test("a role-wide file from an earlier install is never read for a tool: doctor and install agent say where it belongs", () => withHome((home) => {
-  const pkg = forgejoPackage(join(home, "fj"));
-  installTool(ctxFor("claude", home), pkg);
-  const creds = join(home, ".vbcdx", "credentials");
-  const legacy = writeCred(creds, "review-agent.env", 'VBCDX_AGENTS_ROLE="review-agent"\nVBCDX_AGENTS_USER="u"\nVBCDX_AGENTS_TOKEN="t"\n');
-  const file = join(creds, "review-agent", "forgejo.env");
-  const r = installAgent(ctxFor("claude", home), ["review-agent"]);
-  const hint = `; ${legacy} is no longer read for forgejo: copy its forgejo credentials to ${file}`;
-  assert.ok(r.warnings.some((w) => w.endsWith(hint)), r.warnings.join("\n"));
-  assert.equal(r.credentials.length, 0, "install never moves or rewrites a credential file");
-  const rep = doctor(ctxFor("claude", home), { env: { FJ_URL: "x" } });
-  const check = rep.tools[0].checks.find((c) => c.check === "credential file review-agent");
-  assert.equal(check.ok, false, "the legacy file does not satisfy the binding");
-  assert.ok(check.detail.endsWith(hint), check.detail);
-  assert.equal(existsSync(file), false);
-  assert.equal(read(legacy), 'VBCDX_AGENTS_ROLE="review-agent"\nVBCDX_AGENTS_USER="u"\nVBCDX_AGENTS_TOKEN="t"\n', "the legacy file is left as it was");
-}));
-
-test("install agent without installed tools binds nothing; a tool without credential_file binds by role", () => withHome((home) => {
+test("install agent without installed tools binds nothing; an installed tool binds by role", () => withHome((home) => {
   installAgent(ctxFor("opencode", home), ["review-agent"]);
   assert.equal(read(join(home, ".config", "opencode", "agents", "review-agent.md")).includes("forgejo_"), false);
-  installTool(ctxFor("opencode", home), forgejoPackage(join(home, "fj"), { credentialFile: false }));
+  installTool(ctxFor("opencode", home), forgejoPackage(join(home, "fj")));
   installAgent(ctxFor("opencode", home), ["review-agent"]);
   const def = read(join(home, ".config", "opencode", "agents", "review-agent.md"));
   assert.match(def, /forgejo_whoami: true/);
-  assert.match(def, /call forgejo tools without a credential_file argument/);
+  assert.match(def, /- `forgejo`: tools available to your role: get_issue, whoami\./);
+  assert.doesNotMatch(def, /credential_file|identity is supplied/);
 }));
 
 test("install agent on hermes gives the profile the declared launch for the installed tool", () => withHome((home) => {
@@ -532,6 +472,22 @@ test("install skill on hermes reports unsupported and writes nothing", () => wit
   assert.equal(codeOf(() => installSkill(ctxFor("hermes", home), "writing-notes")), EXIT.CONFLICT);
   assert.deepEqual(readdirSync(home), []);
   assert.equal(codeOf(() => installSkill(ctxFor("claude", home), "no-such-skill")), EXIT.CONFIG);
+}));
+
+test("install skill refuses a catalogue skill whose frontmatter has no usable name and description", () => withHome((home) => {
+  // A pack loads without judging its skills (readPack reads the declaration and the
+  // roles only), so a broken skill document reaches the catalogue and is refused there.
+  const packDir = join(home, "broken-pack");
+  cpSync(FIXTURE_PACK_DIR, packDir, { recursive: true });
+  writeFileSync(join(packDir, "skills", "development", "NO-FRONTMATTER.MD"), "# No frontmatter here\n");
+  const previous = setActiveCatalog(buildCatalog([readPack(packDir)]));
+  try {
+    assert.throws(() => installSkill(ctxFor("claude", home), "NO-FRONTMATTER"),
+      /Skill development\/NO-FRONTMATTER\.MD needs frontmatter with a lowercase-hyphenated name and a description\./);
+    assert.equal(existsSync(join(home, ".claude", "skills", "NO-FRONTMATTER")), false, "nothing written");
+  } finally {
+    setActiveCatalog(previous);
+  }
 }));
 
 test("remove skill accepts the names install skill accepts", () => withHome((home) => {
@@ -608,7 +564,7 @@ test("remove agent on hermes removes owned keys from config.yaml and keeps the o
   assert.equal(existsSync(join(home, ".hermes", "profiles", "qa-agent", "SOUL.md")), false);
 }));
 
-test("the manifest command sees PATH, HOME and its declared variables, not the caller's other ones (review finding 4)", () => withHome((home) => {
+test("the manifest command sees PATH, HOME and its declared variables, not the caller's other ones", () => withHome((home) => {
   const pkg = forgejoPackage(join(home, "fj"));
   // A manifest that names one tool per variable it can see.
   writeFileSync(join(pkg, "bin", "fj-tool.js"),
@@ -678,6 +634,20 @@ test("doctor checks package, entry, manifest command and env, reporting set/unse
   const file = join(home, ".claude.json");
   writeFileSync(file, "{}");
   assert.equal(doctor(ctxFor("claude", home), { env: { EXAMPLE_TRACKER_URL: "x" } }).ok, false, "a missing entry fails");
+}));
+
+test("doctor reports a manifest command that exits non-zero instead of throwing", () => withHome((home) => {
+  const pkg = forgejoPackage(join(home, "fj"));
+  installTool(ctxFor("claude", home), pkg);
+  // Doctor re-reads the package as it is now, so the bin is replaced after install:
+  // the declaration stays valid and only running the manifest command fails.
+  writeFileSync(join(pkg, "bin", "fj-tool.js"), "process.exit(1);\n");
+  const r = doctor(ctxFor("claude", home), { env: { ...process.env, FJ_URL: "https://forge.example.com" } });
+  const checks = Object.fromEntries(r.tools[0].checks.map((c) => [c.check, c]));
+  assert.equal(checks.manifest.ok, false);
+  assert.match(checks.manifest.detail, /manifest command exited 1\./);
+  assert.equal(r.tools[0].ok, false);
+  assert.equal(r.ok, false);
 }));
 
 // ── context and arguments ────────────────────────────────────────────────────
@@ -802,12 +772,11 @@ test("CLI: install tool, install agent, re-run, list, doctor, remove", () => wit
   assert.equal(vbcdx(home, ["install", "tool", pkg, "--harness=claude", "--quiet"]).status, 0);
   r = vbcdx(home, ["list", "--harness=claude", "--json"]);
   assert.deepEqual(JSON.parse(r.stdout).agents.map((a) => a.role), ["review-agent"]);
-  r = vbcdx(home, ["doctor", "--harness=claude"], { FJ_URL: "https://forge.example.com/secret-path" });
-  assert.equal(r.status, EXIT.CONFLICT, "the role's credential file does not exist yet");
-  assert.match(r.stdout, /FAIL credential file review-agent: .*review-agent\/forgejo\.env missing/);
-  writeCred(join(home, ".vbcdx", "credentials"), join("review-agent", "forgejo.env"), 'VBCDX_AGENTS_ROLE="review-agent"\nVBCDX_AGENTS_USER="u"\nVBCDX_AGENTS_TOKEN="t"\n');
+  // No credential file is needed, looked for or created: doctor passes on the tool's own checks.
   r = vbcdx(home, ["doctor", "--harness=claude"], { FJ_URL: "https://forge.example.com/secret-path" });
   assert.equal(r.status, 0, r.stdout);
+  assert.doesNotMatch(r.stdout, /credential/);
+  assert.equal(existsSync(join(home, ".vbcdx", "credentials")), false);
   assert.equal((r.stdout + r.stderr).includes("secret-path"), false);
   assert.equal(vbcdx(home, ["doctor", "--harness=claude"], { FJ_URL: "" }).status, EXIT.CONFLICT);
   r = vbcdx(home, ["remove", "tool", "forgejo", "--harness=claude"]);
@@ -833,7 +802,7 @@ test("printableValue also escapes newlines and tabs, so a value cannot break its
   assert.equal(printableValue("plain — ünïcödé"), "plain — ünïcödé");
 });
 
-test("CLI: control sequences in printed text reach the terminal escaped (review finding 3)", () => withHome((home) => {
+test("CLI: control sequences in printed text reach the terminal escaped", () => withHome((home) => {
   mkdirSync(join(home, ".claude")); // Claude Code is installed: install uses its default home
   const bad = join(home, "pkg\u001b[2K\u001b[31mSPOOFED\u2028x");
   const r = vbcdx(home, ["install", "tool", bad, "--harness=claude"]);
@@ -995,44 +964,27 @@ test("a setting read only in http mode stays out of the stdio install: entry, wa
   assert.deepEqual(cfg.mcp_servers.forgejo.env, { FJ_URL: "${FJ_URL}", FJ_STDIO_ONLY: "${FJ_STDIO_ONLY}" });
 }));
 
-test("an integrations-file stdio service on Hermes starts the way the installed tool of that name and contract declares", () => withHome((home) => {
+test("with an integrations file configured, installed tools are not bound: the file replaces them and binds no role itself", () => withHome((home) => {
   const pkg = forgejoPackage(join(home, "fj"));
-  const declPath = join(pkg, "vbcdx.json");
-  const decl = readJson(declPath);
-  decl.http = { args: ["serve"], path: "/mcp", port_env: "FJ_HTTP_PORT" };
-  decl.env.push({ name: "FJ_HTTP_PORT", description: "Listen port in network mode.", kind: "config", required: false, modes: ["http"] });
-  writeFileSync(declPath, JSON.stringify(decl));
   const manifestFile = join(home, "forgejo.json");
   const integrations = join(home, "integrations.json");
   const cfg = join(home, "config.env");
-  const writeIntegrations = (contract, extra = {}) => {
-    writeFileSync(manifestFile, JSON.stringify({ ...fullManifest(["get_issue", "whoami"]), contract }));
-    writeFileSync(integrations, JSON.stringify({ schema_version: 1, services: { forgejo: { server_name: "forgejo", manifest_file: manifestFile, credentials: { "review-agent": join(home, "creds", "review-agent.env") }, ...extra } } }));
-  };
-  writeFileSync(cfg, [`VBCDX_AGENTS_BASE_DIR=${home}/state`, `VBCDX_AGENTS_CREDENTIALS_DIR=${home}/creds`, `VBCDX_AGENTS_HERMES_HOME=${home}/hermes`,
-    `VBCDX_AGENTS_INTEGRATIONS_FILE=${integrations}`, "VBCDX_AGENTS_USER_REVIEW_AGENT=u", "VBCDX_AGENTS_TOKEN_REVIEW_AGENT=t"].join("\n") + "\n");
+  writeFileSync(manifestFile, JSON.stringify(fullManifest(["get_issue", "whoami"])));
+  writeFileSync(integrations, JSON.stringify({ schema_version: 1, services: { forgejo: { server_name: "forgejo", manifest_file: manifestFile, stdio: { command: "acme-forge", args: ["mcp"], env: ["ACME_FORGE_URL"] } } } }));
+  const lines = [`VBCDX_AGENTS_BASE_DIR=${home}/state`, `VBCDX_AGENTS_HERMES_HOME=${home}/hermes`];
   const ctx = () => resolveContext({ harness: "hermes", scope: "user", envPath: cfg, home, cwd: home, env: {} });
-  writeIntegrations("vbcdx.forgejo/1");
-  installTool(ctx(), pkg);
-  installAgent(ctx(), ["review-agent"]);
   const server = () => parsePy(read(join(home, "hermes", "profiles", "review-agent", "config.yaml"))).mcp_servers?.forgejo;
+  // Without the file the installed tool is bound, started the way its vbcdx.json declares.
+  writeFileSync(cfg, lines.join("\n") + "\n");
+  installTool(ctx(), pkg);
+  let r = installAgent(ctx(), ["review-agent"]);
+  assert.deepEqual(r.integrations, ["forgejo"]);
   assert.deepEqual(plain(server()), { command: "node", args: [join(pkg, "bin", "fj-tool.js"), "mcp"], env: { FJ_URL: "${FJ_URL}" }, tools: { include: ["get_issue", "whoami"], prompts: false, resources: false } });
-  // Another contract under the same name is not that tool, and nothing else says how to start
-  // it: no contract has a launch built in, so the install stops, naming both fixes.
-  writeIntegrations("other.forge/1");
-  assert.throws(() => installAgent(ctx(), ["review-agent"], { force: true }), (err) => {
-    assert.equal(err.code, EXIT.CONFIG, err.message);
-    assert.match(err.message, /Service forgejo is a stdio service bound to a role, but nothing says how to start it: install its tool with `vbcdx install tool`, or give the service a "stdio" launch/);
-    return true;
-  });
-  // A launch declared in the integrations file starts it, for any contract, and wins over an
-  // installed tool of the same name and contract.
-  const launch = { command: "acme-forge", args: ["mcp"], env: ["ACME_FORGE_URL"] };
-  for (const contract of ["other.forge/1", "vbcdx.forgejo/1"]) {
-    writeIntegrations(contract, { stdio: launch });
-    installAgent(ctx(), ["review-agent"], { force: true });
-    assert.deepEqual(plain(server()), { command: "acme-forge", args: ["mcp"], env: { ACME_FORGE_URL: "${ACME_FORGE_URL}" }, tools: { include: ["get_issue", "whoami"], prompts: false, resources: false } }, contract);
-  }
+  // With it, the file's services are the ones listed, and none of them has a role.
+  writeFileSync(cfg, [...lines, `VBCDX_AGENTS_INTEGRATIONS_FILE=${integrations}`].join("\n") + "\n");
+  r = installAgent(ctx(), ["review-agent"]);
+  assert.deepEqual(r.integrations, ["forgejo"]);
+  assert.equal(server(), undefined, "no role is bound, so the profile has no entry: neither the file's launch nor the installed tool's");
 }));
 
 test("doctor checks the settings the package declares now, not the ones recorded at install", () => withHome((home) => {

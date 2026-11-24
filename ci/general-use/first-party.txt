@@ -1,0 +1,16 @@
+# First-party names, and the files that may hold them. Format: name<TAB>text, file<TAB>path.
+# A name in any other non-test file fails the general-use gate: a first-party tool reaches
+# the installer the way a third party's does, through a declaration.
+name	vbcdx.forgejo/
+name	vbcdx.coolify/
+name	COOLIFY_CONTRACT
+name	forgejo-plugin
+name	coolify-plugin
+# The declarations: the contract ids, and the built-in source table.
+file	src/config/integrations.js
+file	src/sources/config.js
+# Their documentation: the README and the schema descriptions that give an id as an example.
+file	README.md
+file	schema/vbcdx-pack.schema.json
+file	schema/vbcdx-role.schema.json
+file	schema/vbcdx-tool.schema.json

@@ -6,11 +6,10 @@
 // finds its siblings), then the global root `npm root -g` reports. When none has it,
 // the error names the `npm install` command to run.
 
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { parseStrictJson } from "../config/json.js";
 import { configError } from "../errors.js";
 import { shownName } from "../shown.js";
 
@@ -86,24 +85,7 @@ export function locatePackageDir(spec, { cwd = process.cwd(), home, packageRoot,
   return realpathSync(dir);
 }
 
-/**
- * Read and check a located package's package.json: a package found by path picked its
- * own name and version, so both are checked as strictly as a named spec before either
- * is printed or recorded, and a named spec must find the package it named.
- */
-export function readPackageJson(dir, spec) {
-  const pkgPath = join(dir, "package.json");
-  let raw;
-  try {
-    raw = readFileSync(pkgPath, "utf8");
-  } catch (err) {
-    throw configError(`${dir} has no readable package.json (${err.code || "read error"}).`);
-  }
-  const pkg = parseStrictJson(raw, pkgPath);
-  checkPackageIdentity(dir, spec, pkg);
-  return pkg;
-}
-
+// A package found by path picked its own name and version, so both are checked as strictly as a named spec.
 export function checkPackageIdentity(dir, spec, pkg) {
   if (typeof pkg.name !== "string" || !PACKAGE_NAME_RE.test(pkg.name)) {
     throw configError(`${dir}/package.json has no valid npm package name.`);

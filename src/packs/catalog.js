@@ -16,7 +16,6 @@ import { lockedSource } from "../sources/lock.js";
 import { buildSkillCatalogue } from "../skills/catalogue.js";
 import { PACK_DECLARATION_FILE, readPack } from "./load.js";
 import { composeRoles, overlayShipsPack, readOverlay } from "../overlays/overlay.js";
-import { idToSuffix } from "../roles/registry.js";
 
 /**
  * Build a catalogue from read packs (in the order given). Each role's prompt is composed
@@ -39,11 +38,11 @@ export function buildCatalog(packs, { overlays = [] } = {}) {
     }
   }
   // Composed roles, keyed by the id each installs under: a role an overlay renames
-  // takes its local id, in descriptor and credential suffix too.
+  // takes its local id in its descriptor too.
   const composed = new Map();
   for (const [id, c] of composeRoles(packs, overlays)) {
     const base = roles.get(c.renamedFrom || id);
-    const descriptor = c.renamedFrom ? Object.freeze({ ...base.descriptor, id, credential_suffix: idToSuffix(id) }) : base.descriptor;
+    const descriptor = c.renamedFrom ? Object.freeze({ ...base.descriptor, id }) : base.descriptor;
     composed.set(id, Object.freeze({ ...base, id, descriptor, prompt: c.prompt, overlays: Object.freeze(c.overlays), renamedFrom: c.renamedFrom }));
   }
   roles.clear();

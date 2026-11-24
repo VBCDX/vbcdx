@@ -1,0 +1,14 @@
+# The coverage CI requires of bin/ and src/, in percent. scripts/check-coverage.mjs fails
+# when a total is under its floor. The floor starts at the measured baseline and only goes
+# up, to 100: raise a number when a change lifts the measurement, never lower one.
+#
+# Measured at main fa32914cbf0f by the coverage job (run 21675, job 33142, every test green):
+#   lines      10631/10631  100.00%
+#   branches    5688/5750    98.92%
+#   functions    782/782    100.00%
+# Lines and functions are at 100, so their floors are 100: any uncovered line new code adds
+# fails CI here. Branches are cut to one decimal (98.9) and rise as the remaining 62 untaken
+# arms are covered, to 100.
+lines 100
+branches 98.9
+functions 100

@@ -125,9 +125,8 @@
             }
           },
           "kind": {
-            "description": "credential: a secret the user supplies (written only as a ${VAR} reference); config: a non-secret setting.",
+            "description": "config: a non-secret setting, written into a harness entry only as a reference to the variable. It is the only kind. A tool that needs a key (an API token, a password) is not declared here: its key lives in Keyhole and reaches the tool through the sidecar, and `vbcdx install tool` refuses a declaration with kind credential or a credential_file field.",
             "enum": [
-              "credential",
               "config"
             ]
           },
@@ -148,20 +147,6 @@
               ]
             }
           }
-        }
-      }
-    },
-    "credential_file": {
-      "description": "Optional. Present when each tool call takes an absolute credential file path as an argument (the per-role identity); argument is that argument's name. vbcdx binds roles before the file exists, because some tools pass credentials through, so the tool itself must fail a call whose file is missing, unreadable or incomplete with an error that names the file and says what it must contain, never with a bare failure or by falling back to another identity. `vbcdx doctor` also reports a missing file.",
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "argument"
-      ],
-      "properties": {
-        "argument": {
-          "type": "string",
-          "pattern": "^[a-z][a-z0-9_]{0,63}$"
         }
       }
     },

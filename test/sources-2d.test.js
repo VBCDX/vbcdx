@@ -431,7 +431,15 @@ test("npm runs with no caller secret, empty configs, an explicit registry, and w
   assert.equal(vars.npm_config_registry, "https://registry.npmjs.org/");
   assert.notEqual(vars.HOME, process.env.HOME);
   assert.notEqual(vars.npm_config_userconfig, vars.npm_config_globalconfig);
-  assert.deepEqual(Object.keys(vars).filter((k) => !["PATH", "HOME", "PWD", "SHLVL", "_", "OLDPWD"].includes(k) && !k.startsWith("npm_config_")), [],
+  const allowed = ["PATH", "HOME", "PWD", "SHLVL", "_", "OLDPWD"];
+  // Node copies its own NODE_V8_COVERAGE into every child it starts, a child with a replaced
+  // environment included. So when this test itself runs under coverage npm sees that one
+  // variable, with this process's value; in a run without coverage it must not be there.
+  if (process.env.NODE_V8_COVERAGE) {
+    assert.equal(vars.NODE_V8_COVERAGE, process.env.NODE_V8_COVERAGE);
+    allowed.push("NODE_V8_COVERAGE");
+  }
+  assert.deepEqual(Object.keys(vars).filter((k) => !allowed.includes(k) && !k.startsWith("npm_config_")), [],
     "nothing else of the caller's environment reaches npm");
   const stored = join(root, "store", out.sources[0].path);
   assert.equal(existsSync(join(stored, ".npmrc")), false);
@@ -455,6 +463,18 @@ test("the caller's own registry and proxy are kept, but never a registry that ca
       const s2 = mkdtempSync(join(root, "b-"));
       assert.throws(() => npmEnv({ npm_config_registry: bad }, s2), /npm_config_registry must be/);
     }
+  });
+});
+
+test("an empty registry variable keeps the default registry, with nothing to validate", async () => {
+  // src/sources/fetch.js:44 — the `!== ""` arm.
+  const { npmEnv, DEFAULT_NPM_REGISTRY } = await import("../src/sources/fetch.js");
+  withDir((root) => {
+    const scratch = join(root, "npm");
+    mkdirSync(scratch);
+    const env = npmEnv({ npm_config_registry: "" }, scratch);
+    assert.equal(env.npm_config_registry, DEFAULT_NPM_REGISTRY);
+    assert.equal(env.npm_config_registry, "https://registry.npmjs.org/");
   });
 });
 
@@ -592,4 +612,29 @@ test("a dir source that contains the store is a named error, not a recursion", (
   assert.equal(r.code, EXIT.CONFIG);
   assert.match(r.message, /^Source here: .* contains the store .*vbcdx-store; put the store outside the source \(--store\)\.$/);
   assert.equal(existsSync(join(src, "vbcdx.lock.json")), false);
+}));
+
+test("a dir source with a child store named ..store is refused, not recursed into", () => withDir((root) => {
+  const src = join(root, "src");
+  cpSync(PACK, src, { recursive: true });
+  const sourcesPath = join(src, "vbcdx.sources.json");
+  writeFileSync(sourcesPath, JSON.stringify({ schema_version: 1, sources: { here: { dir: "." } } }));
+  const r = codeOf(() => fetchSources({ sourcesPath, lockPath: join(src, "vbcdx.lock.json"), storeDir: join(src, "..store") }));
+  assert.equal(r.code, EXIT.CONFIG);
+  assert.match(r.message, /^Source here: .* contains the store .*\.\.store; put the store outside the source \(--store\)\.$/);
+  assert.equal(existsSync(join(src, "vbcdx.lock.json")), false);
+}));
+
+test("a dir source beside an external store is copied; a store nested in the source is still refused", () => withDir((root) => {
+  const src = join(root, "src");
+  cpSync(PACK, src, { recursive: true });
+  const sourcesPath = join(root, "vbcdx.sources.json");
+  writeFileSync(sourcesPath, JSON.stringify({ schema_version: 1, sources: { here: { dir: "./src" } } }));
+  const out = fetchSources({ sourcesPath, lockPath: join(root, "vbcdx.lock.json"), storeDir: join(root, "store") });
+  assert.equal(out.sources.length, 1);
+  assert.equal(existsSync(join(root, "store", out.sources[0].path, "vbcdx-pack.json")), true);
+  const nested = codeOf(() => fetchSources({ sourcesPath, lockPath: join(root, "lock2.json"), storeDir: join(src, "nested-store") }));
+  assert.equal(nested.code, EXIT.CONFIG);
+  assert.match(nested.message, /contains the store .*nested-store; put the store outside the source \(--store\)\.$/);
+  assert.equal(existsSync(join(root, "lock2.json")), false);
 }));

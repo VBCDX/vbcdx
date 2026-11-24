@@ -117,8 +117,7 @@ export function parseListen(value, { expose = false, acknowledged = false } = {}
 }
 
 // The hardened unit: the installer baseline (NoNewPrivileges, ProtectSystem=strict, PrivateTmp,
-// LimitCORE=0; LoadCredentialEncrypted= once a credential is held) plus systemd's standard
-// sandboxing. A user unit keeps only what an unprivileged user manager can honour.
+// LimitCORE=0) plus systemd's standard sandboxing. A user unit keeps only what an unprivileged user manager can honour.
 const SYSTEM_HARDENING = [
   "NoNewPrivileges=yes", "ProtectSystem=strict", "ProtectHome=yes", "PrivateTmp=yes", "PrivateDevices=yes",
   "ProtectKernelTunables=yes", "ProtectKernelModules=yes", "ProtectKernelLogs=yes", "ProtectControlGroups=yes",
@@ -201,7 +200,6 @@ function unitText({ scope, instance, exec, confDir }) {
         "RuntimeDirectory=vbcdx", "RuntimeDirectoryMode=0750", "RuntimeDirectoryPreserve=yes"]
       : ["RuntimeDirectory=vbcdx", "RuntimeDirectoryMode=0700", "RuntimeDirectoryPreserve=yes"]),
     ...(system ? SYSTEM_HARDENING : USER_HARDENING),
-    "# LoadCredentialEncrypted= is added once the sidecar holds a module credential (none yet).",
     "",
     "[Install]",
     `WantedBy=${system ? "multi-user.target" : "default.target"}`,
@@ -271,7 +269,7 @@ export function publicRecordText({ instance, version, svc }) {
 
 // The control plane's plan: its admin socket, state and optional tunnel listener (CONTROL schema keys only).
 function controlPlan({ instance, release, serviceManager, listen, start, host, P, tunnel }) {
-  // No network listener before the B2 tunnel: the admin socket is all it serves.
+  // No network listener before the tunnel: the admin socket is all it serves.
   if (listen) throw configError("--listen is for the sidecar; the control plane serves its admin socket only in this version.");
   const L = layout({ service: "control-plane", instance, version: release.version, scope: "system", home: host.home });
   const configText = tomlStringify({ admin_socket: L.adminSocket, state_dir: L.state,

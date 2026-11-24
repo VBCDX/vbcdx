@@ -393,7 +393,7 @@ test("an overlay can be a lock source: fetched, kind overlay, and named with --o
 
 // ── rename: a pack role installed under a local id ──────────────────────────
 
-test("rename installs a pack role under the local id only, with its id and credential suffix rewritten", () => withDir((root) => {
+test("rename installs a pack role under the local id only, with its id rewritten", () => withDir((root) => {
   const pack = readPack(slottedPack(root));
   const o = readOverlay(overlay(root, "acme", { decl: { rename: { "review-agent": "red-team" } }, files: { "roles/red-team.md": "Red team rule.\n" } }));
   const c = buildCatalog([pack], { overlays: [o] });
@@ -403,7 +403,6 @@ test("rename installs a pack role under the local id only, with its id and crede
   const r = roleOf(c, "red-team");
   assert.equal(r.id, "red-team");
   assert.equal(r.descriptor.id, "red-team");
-  assert.equal(r.descriptor.credential_suffix, "RED_TEAM");
   assert.equal(r.descriptor.name, pack.roles.find((x) => x.id === "review-agent").descriptor.name, "the display name stays the pack's");
   assert.equal(r.renamedFrom, "review-agent");
   assert.ok(r.prompt.endsWith("Red team rule.\n"));
@@ -428,15 +427,16 @@ test("rename refusals: an unknown role, a role of another pack, an id already ta
   }
 }));
 
-test("a renamed role installs, takes its credentials and Hermes profile under the local id, and goes back when the overlay goes", () => withDir((root) => {
+test("a renamed role installs, takes its per-role settings and Hermes profile under the local id, and goes back when the overlay goes", () => withDir((root) => {
   const packDir = slottedPack(root);
   const o = overlay(root, "acme", { decl: { rename: { "review-agent": "red-team" } } });
-  const cfgLines = ["VBCDX_AGENTS_USER_RED_TEAM=rt", "VBCDX_AGENTS_TOKEN_RED_TEAM=SECRET-RT"];
+  // The per-role key of the configuration file is spelled with the local id.
+  const cfgLines = ["VBCDX_AGENTS_HERMES_BASE_URL=https://llm.example/v1", "VBCDX_AGENTS_HERMES_MODEL=provider/default", "VBCDX_AGENTS_HERMES_MODEL_RED_TEAM=provider/red"];
   const r = initAt(root, "hermes", packDir, [o], cfgLines);
   assert.match(r.stdout, /definition red-team: install -> .*profiles\/red-team\/SOUL\.md/);
   assert.equal(existsSync(join(root, "home-hermes", "profiles", "review-agent")), false);
-  assert.equal(read(join(root, "creds", "red-team.env")), 'VBCDX_AGENTS_ROLE="red-team"\nVBCDX_AGENTS_USER="rt"\nVBCDX_AGENTS_TOKEN="SECRET-RT"\n');
-  assert.equal((r.stdout + r.stderr).includes("SECRET-RT"), false);
+  assert.match(read(join(root, "home-hermes", "profiles", "red-team", "config.yaml")), /default: provider\/red/);
+  assert.equal(existsSync(join(root, "creds")), false, "no credentials directory is created");
   const cfg = join(root, "hermes.env");
   const only = spawnSync(process.execPath, [join(ROOT, "bin", "vbcdx-dev-agents.js"), "init", "--harness=hermes", `--env=${cfg}`, `--pack=${packDir}`, `--overlay=${o}`, "--agents=red-team", "--force"],
     { encoding: "utf8", cwd: root, env: { PATH: process.env.PATH, HOME: root } });
@@ -454,4 +454,15 @@ test("the manifest record of a renamed role notes the pack id it came from", () 
   assert.ok(recs.length > 0);
   for (const f of recs) assert.equal(f.renamed_from, "review-agent");
   assert.equal(Object.values(m.files).some((f) => f.role === "code-agent" && "renamed_from" in f), false);
+}));
+
+test("an undeclared variable says an applying overlay does not set it", () => withDir((root) => {
+  const dir = slottedPack(root);
+  const prompt = join(dir, "assets", "roles", "code-agent", "prompt.md");
+  writeFileSync(prompt, `${read(prompt)}\n{{vars.missing}}\n`);
+  const o = readOverlay(overlay(root, "no-vars"));
+  assert.match(
+    codeOf(() => buildCatalog([readPack(dir)], { overlays: [o] })).message, // src/overlays/overlay.js:267
+    /^Role code-agent uses \{\{vars\.missing\}\}, which pack example-agents does not declare and no overlay sets\.$/,
+  );
 }));

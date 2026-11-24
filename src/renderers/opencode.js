@@ -8,7 +8,7 @@
 // are expressed as permissions. Model is omitted so global/spawn routing wins.
 
 import { stringify as yamlStringify } from "yaml";
-import { opencodePermission, boundServiceTools, mcpToolId, credentialBindingNote } from "./native.js";
+import { opencodePermission, boundServiceTools, mcpToolId, boundToolsNote } from "./native.js";
 
 export function renderOpencode(role, { integrations } = {}) {
   const cap = role.descriptor.local_capabilities;
@@ -20,11 +20,12 @@ export function renderOpencode(role, { integrations } = {}) {
   const bindings = boundServiceTools(role.descriptor, integrations);
   if (bindings.length) {
     const tools = {};
-    for (const b of bindings) for (const t of b.tools) tools[mcpToolId("opencode", b.server, (b.toolPrefix || "") + t)] = true;
+    for (const b of bindings) for (const t of b.tools) tools[mcpToolId("opencode", b.server, t)] = true;
     frontmatter.tools = tools;
   }
   const fm = yamlStringify(frontmatter).trimEnd();
-  const body = role.prompt.trimEnd() + "\n" + credentialBindingNote(bindings);
+  const body = role.prompt.trimEnd() + "\n" + boundToolsNote(bindings);
+  // `body` always ends in "\n": boundToolsNote is "" or ends in one.
   const content = `---\n${fm}\n---\n\n${body}`;
-  return { filename: `${role.id}.md`, content: content.endsWith("\n") ? content : content + "\n", mode: 0o644 };
+  return { filename: `${role.id}.md`, content, mode: 0o644 };
 }

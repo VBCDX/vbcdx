@@ -98,7 +98,7 @@ function catalogue() {
   return activeCatalog().skills;
 }
 
-function trimTrailingSlash(url) {
+export function trimTrailingSlash(url) {
   return String(url).replace(/\/+$/, "");
 }
 

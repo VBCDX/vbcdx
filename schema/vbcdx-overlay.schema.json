@@ -63,7 +63,7 @@
       }
     },
     "rename": {
-      "description": "Optional. Install a pack role under a local id instead of its own: {\"<pack role id>\": \"<local id>\"}. The role keeps the pack's prompt and descriptor; its id and credential suffix become the local id, which this overlay's files (roles/<id>.md, slots/<role>/) also use. The local id must not be a role of any loaded pack.",
+      "description": "Optional. Install a pack role under a local id instead of its own: {\"<pack role id>\": \"<local id>\"}. The role keeps the pack's prompt and descriptor; its id becomes the local id, which this overlay's files (roles/<id>.md, slots/<role>/) also use. The local id must not be a role of any loaded pack.",
       "type": "object",
       "maxProperties": 32,
       "propertyNames": {

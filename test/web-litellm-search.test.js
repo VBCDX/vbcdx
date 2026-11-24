@@ -1,7 +1,7 @@
 // The LiteLLM web provider — search *and* fetch — vendored as a rendered asset.
 //
 // The provider is a Hermes plugin written in Python, so this test runs the real file
-// under python3 (as test/hermes-git.test.js runs hermes-git.py) against a stub LiteLLM
+// under python3 against a stub LiteLLM
 // gateway and a stub page. Only the public provider ABC is stubbed: the plugin must not
 // reach into Hermes' private plumbing, and here it cannot.
 //
@@ -332,7 +332,7 @@ test("each search failure is its own visible error, never an empty result set", 
   } finally { s.close(); }
 });
 
-test("an HTTP error that explains itself keeps its explanation, redacted (review O1)", async () => {
+test("an HTTP error that explains itself keeps its explanation, redacted", async () => {
   const s = await stub();
   try {
     // the cause survives: a 500 that says why must not read as a bare status code
@@ -368,7 +368,7 @@ test("a configured but unknown search tool is reported, not softened to no resul
 
 // ---- redirects: refused on both requests
 
-test("a gateway that redirects cannot hand the key to another host (review B1)", async () => {
+test("a gateway that redirects cannot hand the key to another host", async () => {
   const other = await decoy();
   const s = await stub({ redirectSearchTo: other.base });
   try {
@@ -387,7 +387,25 @@ test("a gateway that redirects cannot hand the key to another host (review B1)",
   } finally { s.close(); other.close(); }
 });
 
-test("a page that redirects is refused, not followed off the URL that was checked (review S1)", async () => {
+test("the search request ignores the environment's proxy settings, so a proxy never sees the key", async () => {
+  // A proxy that records everything: with the plugin honouring http_proxy, the search would
+  // go to it, Authorization header and all.
+  const proxy = await decoy();
+  const s = await stub();
+  try {
+    const env = { http_proxy: proxy.base, HTTP_PROXY: proxy.base, https_proxy: proxy.base, HTTPS_PROXY: proxy.base, all_proxy: proxy.base, ALL_PROXY: proxy.base };
+    const { raw, out } = await runProvider({ base: s.base, search: "proxy", env });
+    const received = JSON.stringify(proxy.seen).split(KEY).join("<redacted>");
+    assert.deepEqual(proxy.seen, [], `the proxy must not be contacted at all; it received ${received}`);
+    // The gateway was reached directly, with the key.
+    assert.equal(out.search.success, true);
+    assert.equal(s.seen.search.length, 1);
+    assert.equal(s.seen.search[0].auth, `Bearer ${KEY}`);
+    assert.ok(!raw.includes(KEY), "the credential must not appear anywhere in the provider's output");
+  } finally { s.close(); proxy.close(); }
+});
+
+test("a page that redirects is refused, not followed off the URL that was checked", async () => {
   const other = await decoy();
   const s = await stub({ redirectPageTo: other.base });
   try {
@@ -473,10 +491,15 @@ test("the address rule admits global unicast addresses and nothing private or sp
 });
 
 // These ranges are refused even where the interpreter would call them global.
-test("NAT64, 6to4, Teredo and the IPv4 special ranges are refused on any Python version", async () => {
+test("NAT64, 6to4, Teredo, the IPv4 special ranges and the deprecated IPv4-embedding/site-local ranges are refused on any Python version", async () => {
   const denied = ["64:ff9b::a00:1", "64:ff9b::808:808", "64:ff9b:1::1", "2002:a00:1::1", "2002:808:808::1", "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+    // IPv4-compatible (::/96) and IPv4-translated (::ffff:0:0:0/96) both embed an IPv4 address.
+    "::a00:1", "::10.0.0.1", "::ffff:0:a00:1", "::ffff:0:10.0.0.1",
+    // Deprecated site-local (fec0::/10).
+    "fec0::1", "fec0::a00:1",
     "192.0.0.8", "198.18.0.1", "198.19.255.254", "240.0.0.1", "255.255.255.254", "::ffff:198.18.0.1"];
-  const controls = ["8.8.8.8", "2001:4860:4860::8888", "64:ff9a::1", "2003::1", "192.0.1.1", "198.20.0.1", "239.255.255.254"];
+  // A mapped public IPv4 and a global IPv6 sit outside the added ranges: still admitted.
+  const controls = ["8.8.8.8", "::ffff:8.8.8.8", "2001:4860:4860::8888", "64:ff9a::1", "2003::1", "192.0.1.1", "198.20.0.1", "239.255.255.254"];
   const { out } = await runProvider({ globalProbe: [...denied, ...controls] });
   for (const a of denied) assert.equal(out.forced[a], false, a);
   // A neighbour just outside each range, forced global too, is still admitted: only the listed ranges are refused.
@@ -515,7 +538,7 @@ test("a key the gateway echoes back is redacted, and no key value reaches the re
   } finally { s.close(); }
 });
 
-test("the key the picker advertises wins over the legacy name, and both are named (review O2)", async () => {
+test("the key the picker advertises wins over the legacy name, and both are named", async () => {
   const s = await stub();
   try {
     // Both names set to different values: the advertised one must be the one the gateway sees.

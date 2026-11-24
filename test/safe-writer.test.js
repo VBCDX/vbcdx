@@ -6,9 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   atomicWrite, assertNoSymlinkComponents, validateExistingFile, acquireLocks, sha256,
-  assertRegularDestination, symlinkRefusalFor, ensurePrivateCredentialDir, removeManagedFile,
+  assertRegularDestination, symlinkRefusalFor, removeManagedFile,
 } from "../src/fs/safe-writer.js";
 import { classifyGenerated, applyGenerated } from "../src/fs/manifest.js";
+import { EXIT } from "../src/errors.js";
 
 function scratch() {
   return mkdtempSync(join(tmpdir(), "vbcdx-sw-"));
@@ -95,21 +96,6 @@ test("assertNoSymlinkComponents rejects a symlinked directory component", () => 
   rmSync(d, { recursive: true, force: true });
 });
 
-test("validateExistingFile enforces 0600 in a 0700 dir for secrets", () => {
-  const d = scratch();
-  const secretDir = join(d, "creds");
-  mkdirSync(secretDir, { mode: 0o700 });
-  const f = join(secretDir, "role.env");
-  writeFileSync(f, "x", { mode: 0o600 });
-  assert.doesNotThrow(() => validateExistingFile(f, { secret: true }));
-  // Widen the mode -> rejected.
-  const f2 = join(secretDir, "loose.env");
-  writeFileSync(f2, "x", { mode: 0o644 });
-  chmodSync(f2, 0o644); // writeFileSync's mode is masked by the umask
-  assert.throws(() => validateExistingFile(f2, { secret: true }), /0600/);
-  rmSync(d, { recursive: true, force: true });
-});
-
 test("validateExistingFile rejects a FIFO promptly instead of blocking on it", {
   skip: process.platform === "win32" ? "mkfifo is POSIX-only" : false,
 }, () => {
@@ -161,13 +147,15 @@ test("validateExistingFile rejects a FIFO promptly instead of blocking on it", {
   assert.equal(out, "OK", `expected a prompt "Not a regular file" rejection, got: ${out}`);
 });
 
-test("secret writes never briefly exist with a broad mode", () => {
+test("a 0600 write is 0600 from its first byte, and validateExistingFile has no stricter mode", () => {
   const d = scratch();
-  const secretDir = join(d, "creds");
-  mkdirSync(secretDir, { mode: 0o700 });
-  const f = join(secretDir, "s.env");
-  atomicWrite(f, "token", { mode: 0o600, secret: true });
+  const f = join(d, "private.toml");
+  atomicWrite(f, "x", { mode: 0o600 });
   assert.equal(statSync(f).mode & 0o777, 0o600);
+  // There is one validation, for every managed file: regular, not a symlink, owned by the
+  // user. A broad mode is not this function's business any more (no credential file is written).
+  chmodSync(f, 0o644);
+  assert.equal(validateExistingFile(f).isFile(), true);
   rmSync(d, { recursive: true, force: true });
 });
 
@@ -234,58 +222,15 @@ test("atomicWrite gives the declared mode whatever the umask", () => {
   } finally {
     process.umask(old);
   }
-  const old2 = process.umask(0o000); // and a permissive one: a secret stays 0600
+  const old2 = process.umask(0o000); // and a permissive one: a 0600 file stays 0600
   try {
-    const secretDir = join(d, "creds");
-    mkdirSync(secretDir, { mode: 0o700 });
-    chmodSync(secretDir, 0o700);
-    const f = join(secretDir, "role.env");
-    atomicWrite(f, "x", { mode: 0o600, secret: true });
+    const f = join(d, "private.toml");
+    atomicWrite(f, "x", { mode: 0o600 });
     assert.equal(statSync(f).mode & 0o777, 0o600);
   } finally {
     process.umask(old2);
   }
   rmSync(d, { recursive: true, force: true });
-});
-
-test("ensurePrivateCredentialDir creates exactly 0700 whatever the umask, and leaves an existing dir alone", () => {
-  const d = scratch();
-  const made = join(d, "creds");
-  const old = process.umask(0o177); // would strip the owner-execute bit from mkdir
-  try {
-    ensurePrivateCredentialDir(made);
-  } finally {
-    process.umask(old);
-  }
-  assert.equal(statSync(made).mode & 0o777, 0o700, "a created credentials dir is exactly 0700");
-  // An existing dir is not touched: forcing its mode would mask the non-private
-  // dir the credential pre-check exists to refuse.
-  const existing = join(d, "existing");
-  mkdirSync(existing, { recursive: true });
-  chmodSync(existing, 0o755);
-  ensurePrivateCredentialDir(existing);
-  assert.equal(statSync(existing).mode & 0o777, 0o755, "an existing dir keeps its mode");
-  rmSync(d, { recursive: true, force: true });
-});
-
-test("ensurePrivateCredentialDir forces 0700 on every missing ancestor under an exotic umask", () => {
-  const d = scratch();
-  const previous = process.umask(0o177); // would leave every plain mkdir 0600
-  try {
-    const deep = join(d, "missing-base", ".config", "vbcdx", "credentials");
-    ensurePrivateCredentialDir(deep);
-    for (const dir of [
-      join(d, "missing-base"),
-      join(d, "missing-base", ".config"),
-      join(d, "missing-base", ".config", "vbcdx"),
-      deep,
-    ]) {
-      assert.equal(statSync(dir).mode & 0o777, 0o700, `${dir} is exactly 0700`);
-    }
-  } finally {
-    process.umask(previous);
-    rmSync(d, { recursive: true, force: true });
-  }
 });
 
 test("removeManagedFile surfaces an object that reappears across the unlink", () => {
@@ -326,5 +271,35 @@ test("removeManagedFile fails closed on an unconfirmable post-unlink stat", () =
   const gone = join(d, "gone.txt");
   writeFileSync(gone, "x", { mode: 0o600 });
   assert.equal(removeManagedFile(gone), true, "a real removal still returns true");
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("removeManagedFile treats an unlink that lost the race as already gone", () => {
+  const d = scratch();
+  const p = join(d, "managed.txt");
+  writeFileSync(p, "original", { mode: 0o600 });
+  // The validation and the pre-unlink re-stat passed, then unlink reports
+  // ENOENT: the path is already gone. Nothing is left to remove, so that is
+  // not an error.
+  // src/fs/safe-writer.js:270
+  assert.equal(removeManagedFile(p, {
+    unlinkSync: () => { const err = new Error("gone"); err.code = "ENOENT"; throw err; },
+  }), false);
+  assert.equal(statSync(p).isFile(), true, "the file is still there");
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("removeManagedFile reports the code of an unlink that failed for another reason", () => {
+  const d = scratch();
+  const p = join(d, "managed.txt");
+  writeFileSync(p, "original", { mode: 0o600 });
+  // src/fs/safe-writer.js:271-272
+  assert.throws(
+    () => removeManagedFile(p, {
+      unlinkSync: () => { const err = new Error("input/output error"); err.code = "EIO"; throw err; },
+    }),
+    (err) => err.code === EXIT.FILESYSTEM && err.message === `Failed to remove ${p}: EIO.`,
+  );
+  assert.equal(statSync(p).isFile(), true, "the file is still there");
   rmSync(d, { recursive: true, force: true });
 });

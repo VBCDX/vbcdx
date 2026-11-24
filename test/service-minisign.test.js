@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { keyIdText, parsePublicKey, verifyMinisign } from "../src/service/minisign.js";
+import { keyIdText, parsePublicKey, parseSignature, verifyMinisign } from "../src/service/minisign.js";
 
 // Known-good vectors from jedisct1/rust-minisign-verify (src/lib.rs tests), made by the
 // reference minisign, so the verifier is checked against an implementation that is not ours.
@@ -88,4 +88,65 @@ test("rotation: with two keys pinned, a release signed by either verifies, in ei
   b.keyId.copy(raw, 2);
   forged[1] = raw.toString("base64");
   assert.throws(() => verifyMinisign(data, forged.join("\n"), [a.pub, b.pub]), (e) => e.code === 5 && /does not match the file/.test(e.message));
+});
+
+// The refusal branches that the reference vectors and the local signer do not reach: a key
+// blob of the wrong length or shape, a signature file whose algorithm marker is unknown or
+// whose trusted comment line is missing, and a key the caller has already parsed.
+const refusedWith = (fn, message) =>
+  assert.throws(fn, (e) => e.code === 5 && e.message === message);
+
+test("public key: a base64 blob of the wrong length is refused with its size and the expected size", () => {
+  // src/service/minisign.js:27
+  refusedWith(
+    () => parsePublicKey(Buffer.alloc(3).toString("base64")),
+    "minisign: the public key is 3 bytes, expected 42.",
+  );
+});
+
+test("public key: a file that holds only its untrusted comment line is refused as not base64", () => {
+  // src/service/minisign.js:34
+  refusedWith(
+    () => parsePublicKey("untrusted comment: only a comment\n"),
+    "minisign: the public key is not base64.",
+  );
+});
+
+test("public key: 42 bytes that do not start with the Ed25519 marker are refused", () => {
+  // src/service/minisign.js:35
+  refusedWith(
+    () => parsePublicKey(Buffer.alloc(42, 1).toString("base64")),
+    "minisign: the public key is not an Ed25519 key.",
+  );
+});
+
+test("signature: an algorithm marker other than ED or Ed is refused", () => {
+  // src/service/minisign.js:48
+  const body = Buffer.concat([Buffer.from("XX", "latin1"), Buffer.alloc(72)]);
+  const text = [
+    "untrusted comment: x",
+    body.toString("base64"),
+    "trusted comment: t",
+    Buffer.alloc(64, 7).toString("base64"),
+  ].join("\n");
+  refusedWith(() => parseSignature(text), "minisign: unknown signature algorithm.");
+});
+
+test("signature: a prehashed signature with no trusted comment line is refused", () => {
+  // src/service/minisign.js:49
+  const body = Buffer.concat([Buffer.from("Ed", "latin1"), Buffer.alloc(72)]);
+  const text = [
+    "untrusted comment: x",
+    body.toString("base64"),
+    "not a trusted comment",
+    Buffer.alloc(64, 7).toString("base64"),
+  ].join("\n");
+  refusedWith(() => parseSignature(text), "minisign: the trusted comment line is missing.");
+});
+
+test("verification: an already-parsed public key verifies without being parsed again", () => {
+  // src/service/minisign.js:65
+  const r = verifyMinisign(Buffer.from("test"), REF_PREHASHED, [parsePublicKey(REF_PK)]);
+  assert.equal(r.trustedComment, "timestamp:1556193335\tfile:test");
+  assert.equal(r.keyId, "E7620F1842B4E81F");
 });

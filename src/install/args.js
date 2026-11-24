@@ -91,7 +91,6 @@ export function parseVbcdxArgs(argv) {
   }
   // Custom sources: fetch writes the lock at build time; sources prints it.
   if (command === "fetch" || command === "sources") {
-    if (positional.length) throw configError(`${command} takes no positional arguments.`);
     for (const k of ["harness", "scope", "env"]) if (opts[k] !== null) throw configError(`${command} does not take --${k}.`);
     if (opts.packs.length || opts.force || opts.dryRun) throw configError(`${command} does not take --pack, --force or --dry-run.`);
     if (command === "sources" && opts.sources !== null) throw configError("sources does not take --sources; it reads the lock.");
@@ -100,7 +99,8 @@ export function parseVbcdxArgs(argv) {
   if (opts.sources !== null) throw configError(`${command} does not take --sources; only fetch reads the sources file.`);
   const takesLock = command === "packs" || command === "install";
   if (opts.lock !== null && !takesLock) throw configError(`${command} does not take --lock.`);
-  if (opts.store !== null && opts.lock === null) throw configError("--store goes with --lock.");
+  if (opts.lock !== null && !isAbsolute(opts.lock)) throw configError("--lock must be an absolute path.");
+  if (opts.store !== null && (opts.lock === null || !isAbsolute(opts.store))) throw configError("--store goes with --lock and must be an absolute path.");
   if ((command === "list" || command === "doctor" || command === "packs") && (opts.force || opts.dryRun)) {
     throw configError(`${command} does not take --force or --dry-run.`);
   }
@@ -137,7 +137,7 @@ export function parseVbcdxArgs(argv) {
 // escape, so output can be neither reordered, hidden nor used to drive the terminal.
 // A value placed inside a printed line goes through printableValue, which escapes
 // newlines and tabs too, so a value can never break its line or forge another.
-// JSON.stringify leaves C1 controls and U+2028/U+2029 raw, so --json goes through it too.
+// JSON.stringify leaves U+0080 to U+009F and U+2028/U+2029 raw, so --json goes through it too.
 const UNPRINTABLE_RE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029]|\p{Cf}|\p{Cs}/gu;
 const UNPRINTABLE_VALUE_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]|\p{Cf}|\p{Cs}/gu;
 const escapeChar = (c) => {

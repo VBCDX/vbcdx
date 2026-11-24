@@ -7,8 +7,10 @@
 //
 // So the installer owns only the keys it renders — platform_toolsets,
 // agent.disabled_toolsets, model, custom_providers, its own
-// mcp_servers.<name> entries, terminal.env_passthrough and, for a web-search role,
-// plugins.enabled and web.search_backend/extract_backend — replaces those, and keeps every other key.
+// mcp_servers.<name> entries and, for a web-search role, plugins.enabled and
+// web.search_backend/extract_backend — replaces those, and keeps every other key.
+// A key an earlier version owned and this one no longer renders (terminal.env_passthrough)
+// is removed through the manifest's recorded owned paths, not through this list.
 // Ownership is checked on the values of those keys (a canonical digest), not on
 // the file: a hand edit of an owned key still conflicts without --force, while
 // a Web UI change to any other key, or a re-serialisation of the whole file,
@@ -22,6 +24,7 @@
 import { readFileSync } from "node:fs";
 import { isMap, isScalar, visit } from "yaml";
 import { PYYAML, PyTimestamp, parsePy, parsePyDocument } from "./pyyaml.js";
+import { isPlainObject } from "./plain-object.js";
 import { sha256 } from "./safe-writer.js";
 
 /** The paths the installer owns in a rendered config document. */
@@ -36,10 +39,6 @@ export function ownedPaths(rendered) {
   if (isPlainObject(rendered.mcp_servers)) {
     for (const name of Object.keys(rendered.mcp_servers)) paths.push(["mcp_servers", name]);
   }
-  // Hermes git: only the passthrough list; other terminal.* settings stay the operator's.
-  if (isPlainObject(rendered.terminal) && Object.hasOwn(rendered.terminal, "env_passthrough")) {
-    paths.push(["terminal", "env_passthrough"]);
-  }
   // Web search: the plugin list and the two backend keys; other web.* settings stay the operator's.
   if (isPlainObject(rendered.plugins) && Object.hasOwn(rendered.plugins, "enabled")) {
     paths.push(["plugins", "enabled"]);
@@ -50,10 +49,6 @@ export function ownedPaths(rendered) {
     }
   }
   return paths;
-}
-
-function isPlainObject(v) {
-  return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
 function lookup(doc, path) {
@@ -124,6 +119,7 @@ export function mergeConfig(existingText, rendered, previousPaths = []) {
     cur.set(p[p.length - 1], doc.createNode(lookup(rendered, p).value));
   }
   // A container the installer emptied (agent, mcp_servers, terminal, plugins, web) is dropped.
+  // terminal: an earlier version owned terminal.env_passthrough; nothing renders it now.
   for (const k of ["agent", "mcp_servers", "terminal", "plugins", "web"]) {
     const node = doc.contents.get(k, true);
     if (isMap(node) && node.items.length === 0 && !Object.hasOwn(rendered, k)) doc.contents.delete(k);

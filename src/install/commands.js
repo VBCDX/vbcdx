@@ -16,14 +16,13 @@ import { existsSync, readFileSync, readdirSync, rmdirSync, statSync, unlinkSync 
 import { readManifest, writeManifest, classifyGenerated } from "../fs/manifest.js";
 import { acquireLocks, atomicWrite, digestOf, ensureDir, sha256, validateExistingFile } from "../fs/safe-writer.js";
 import { mergeConfig, ownedDigest } from "../fs/hermes-config.js";
+import { isPlainObject } from "../fs/plain-object.js";
 import { parsePy } from "../fs/pyyaml.js";
 import { buildPlan } from "../planner.js";
 import { executePlan } from "../executor.js";
 import { resolveHarnessDir, resolveHermesProfileDir } from "../renderers/index.js";
 import { allDocuments } from "../skills/catalogue.js";
-import {
-  collectCredentialTriples, classifyTriple, credentialPath, credentialConfigKey, evaluateExisting, requiredFieldsText, tripleKey,
-} from "../credentials/writer.js";
+import { legacyCredentialLeftovers, LEFTOVER_ADVICE } from "./legacy-credentials.js";
 import { mcpTarget, renderMcpEntry, skillTarget } from "./harness-targets.js";
 import { planEntryWrite, planEntryRemove } from "./config-entry.js";
 import { resolveToolPackage, runToolManifest, binLaunch } from "./tool-package.js";
@@ -111,7 +110,7 @@ export function installTool(ctx, spec, { force = false, dryRun = false } = {}) {
     tools: null, dryRun, warnings: [] };
   const record = {
     package: pkg.name, version: pkg.version, dir: pkg.dir, server_name: decl.server_name, harness: ctx.harness,
-    scope: scopeId(ctx), launch, env: decl.env, credential_file: decl.credential_file ? decl.credential_file.argument : null,
+    scope: scopeId(ctx), launch, env: decl.env,
     manifest_args: decl.manifest.args, bin: decl.stdio.bin, tools: null,
   };
   for (const e of envForMode(decl.env, "stdio")) {
@@ -155,26 +154,38 @@ export function installTool(ctx, spec, { force = false, dryRun = false } = {}) {
 // ── install agent ────────────────────────────────────────────────────────────
 
 /**
+ * True for a tool record an earlier version wrote for a tool that takes a key: one that
+ * declared a per-call credential file, or an environment variable of kind "credential".
+ * `install tool` refuses such a package now (src/install/tool-declaration.js), so only a
+ * record from before the upgrade can be one.
+ */
+export function isKeyedToolRecord(t) {
+  return Boolean(t.credential_file) || (Array.isArray(t.env) && t.env.some((e) => e && e.kind === "credential"));
+}
+
+/** What to do about a keyed tool record, in the words `doctor` and `install agent` both use. */
+const keyedToolAdvice = (ctx, t) =>
+  `${t.server_name} was installed by an earlier version as a tool that takes a per-role credential; it is bound to no role. ` +
+  `Remove it (\`vbcdx remove tool ${t.server_name} --harness=${ctx.harness}\`) and register it as a Keyhole tool`;
+
+/**
  * Bindings for the tools recorded as installed for this harness and scope, in the
  * shape loadIntegrations returns. A role is bound to a tool only through its
  * reviewed allowlist (renderers/native.js boundServiceTools), by the contract its
- * manifest reported (a record from before contracts were kept binds by server name); a
- * tool that takes a per-call credential file names the role's own file for that tool,
- * <CREDENTIALS_DIR>/<role>/<server>.env, so a role bound to two
- * tools holds two tokens.
+ * manifest reported (a record from before contracts were kept binds by server name).
+ * A binding carries no credential and names no credential file. A keyed tool record
+ * (isKeyedToolRecord) binds no role at all.
  */
 export function installedToolBindings(ctx, manifest, roleIds) {
   const services = {};
   for (const t of toolsFor(ctx, manifest)) {
+    if (isKeyedToolRecord(t)) continue;
     const stdio = ctx.harness === "hermes"
       ? { command: t.launch.command, args: t.launch.args, env: Object.fromEntries(envForMode(t.env, "stdio").map((e) => [e.name, `\${${e.name}}`])) }
       : null;
     services[t.server_name] = {
-      serverName: t.server_name, contract: t.contract || null, tools: t.tools, transport: "stdio", url: null, toolPrefix: "",
-      credentialFree: !t.credential_file,
-      roles: t.credential_file ? [] : [...roleIds],
-      credentials: t.credential_file ? Object.fromEntries(roleIds.map((r) => [r, credentialPath(ctx.config.credentialsDir, r, t.server_name)])) : {},
-      gitUrl: null, gitRoles: {}, stdio,
+      serverName: t.server_name, contract: t.contract || null, tools: t.tools,
+      roles: [...roleIds], stdio,
     };
   }
   return Object.keys(services).length ? { services } : null;
@@ -187,47 +198,17 @@ export function installAgent(ctx, roleIds, { force = false, dryRun = false } = {
   };
   const manifest = loadManifest(ctx);
   const installed = installedToolBindings(ctx, manifest, roleIds);
+  // An integrations file, when configured, replaces the installed tools' bindings; it binds
+  // no role to a tool itself (src/config/integrations.js).
   const integrations = ctx.config.integrationsFile ? null : installed;
-  // With an integrations file, a Hermes stdio service with no `stdio` launch of its own
-  // starts the way the installed tool of that name and contract declares.
-  const launches = ctx.config.integrationsFile && installed
-    ? Object.fromEntries(Object.entries(installed.services).filter(([, s]) => s.stdio).map(([name, s]) => [name, { contract: s.contract, stdio: s.stdio }]))
-    : null;
-  const plan = buildPlan(args, ctx.entries, { cwd: ctx.cwd, integrations, launches });
+  const plan = buildPlan(args, ctx.entries, { cwd: ctx.cwd, integrations });
   // The harness's own default home needs no launch variable; setting one would move
   // Claude's user config off ~/.claude.json, where `install tool` wrote the server.
   if (!ctx.rootExplicit) plan.launchEnv = {};
-  if (integrations) {
-    // Only the role/tool pairs the definitions bind: a role whose allowlist grants no
-    // tool of a service is not told to create a file for it.
-    const triples = collectCredentialTriples(ctx.entries);
-    const seen = new Set();
-    for (const g of plan.generated) {
-      for (const [server, path] of Object.entries(g.credentials || {})) {
-        const role = g.role;
-        if (seen.has(`${role}/${server}`)) continue; // a Hermes profile has several files
-        seen.add(`${role}/${server}`);
-        const target = { service: server, contract: integrations.services[server].contract };
-        const triple = triples.get(tripleKey(role, server));
-        const planned = triple && classifyTriple(triple, target) === "complete";
-        if (!planned && !existsSync(path)) {
-          plan.warnings.push(`${role} is bound to ${server}, whose tools take a credential file; create ${path} with ${requiredFieldsText(target)} ` +
-            `(or set ${credentialConfigKey("TOKEN", role, server)} and the rest in the --env file) before using them${legacyHint(ctx, role, server, path)}`);
-        }
-      }
-    }
-  }
+  // A keyed tool an earlier version registered is bound to no role: say so, and how to
+  // clear it. (Credential files left on disk are warned about by buildPlan.)
+  for (const t of toolsFor(ctx, manifest).filter(isKeyedToolRecord)) plan.warnings.push(`${keyedToolAdvice(ctx, t)}.`);
   return { kind: "agent", ...executePlan(plan) };
-}
-
-/**
- * When the role still has the role-wide file an earlier install bound every tool to,
- * say that it is no longer read for this tool and where its contents belong. Nothing
- * moves or rewrites a credential file on its own.
- */
-function legacyHint(ctx, role, server, path) {
-  const legacy = credentialPath(ctx.config.credentialsDir, role);
-  return existsSync(legacy) ? `; ${legacy} is no longer read for ${server}: copy its ${server} credentials to ${path}` : "";
 }
 
 // ── install skill ────────────────────────────────────────────────────────────
@@ -344,14 +325,34 @@ function planOwnedKeysRemove(path, rec) {
   }
   let doc;
   try {
-    doc = parsePy(raw) || {};
+    doc = parsePy(raw);
   } catch {
     return { cls: "conflict", note: "it cannot be read as YAML; left untouched" };
   }
-  const content = mergeConfig(raw, {}, rec.owned_paths);
+  // null (a `null` document or an empty file), a sequence, a scalar or a timestamp is
+  // not a mapping: there are no owned keys to take out, and deleting the file whole
+  // would discard a document the installer cannot read. Refuse it the same way as
+  // unreadable YAML. src/fs/plain-object.js is the predicate the install side uses too.
+  if (!isPlainObject(doc)) return { cls: "conflict", note: "it is not a mapping; left untouched" };
+  let content;
+  try {
+    content = mergeConfig(raw, {}, rec.owned_paths);
+  } catch (err) {
+    // A merge key (or an alias the edit would dangle) cannot be edited in place:
+    // refuse with a note, never let the internal error out as a raw throw.
+    return { cls: "conflict", note: `cannot be edited in place (${err && err.message ? err.message : err}); left untouched` };
+  }
   const left = parsePy(content) || {};
   const cls = Object.keys(left).length === 0 ? "delete-file" : "remove";
-  if (ownedDigest(doc, rec.owned_paths) !== rec.owned_digest) {
+  let fresh;
+  try {
+    fresh = ownedDigest(doc, rec.owned_paths);
+  } catch (err) {
+    // A cyclic alias (or any value canonical() cannot walk) means ownership cannot be
+    // checked: refuse rather than guess, leaving the file and its record as they are.
+    return { cls: "conflict", note: `cannot be read in full (${err && err.message ? err.message : err}); left untouched` };
+  }
+  if (fresh !== rec.owned_digest) {
     return { cls: "conflict", removeAs: cls, content, note: "a key the installer owns was edited; --force removes the owned keys anyway" };
   }
   return { cls, content };
@@ -457,18 +458,14 @@ export function remove(ctx, kind, name, { force = false, dryRun = false } = {}) 
  * Check every tool recorded for this harness: its package and bin still exist, its
  * harness entry is still as written, its manifest command runs, and the variables
  * it declares are set in this shell. Prints names and set/unset only, never a value.
+ *
+ * It also fails on what an earlier version left behind: a tool recorded as taking a
+ * per-role credential, and every credential file still under the old credentials
+ * directory (listed by path; none is opened, moved or deleted).
  */
 export function doctor(ctx, { env = process.env } = {}) {
   const m = loadManifest(ctx);
   const results = [];
-  const installedRoles = list(ctx).agents.map((a) => a.role);
-  // role -> { server: credential file } as each role's definitions bind them.
-  // A role installed before bindings were recorded has none, and is checked
-  // against every credential-file tool as before.
-  const bindings = new Map();
-  for (const rec of Object.values(m.files)) {
-    if (rec.harness === ctx.harness && rec.role && rec.credentials && typeof rec.credentials === "object") bindings.set(rec.role, rec.credentials);
-  }
   for (const t of Object.values(m.tools).filter((x) => x.harness === ctx.harness)) {
     const problems = [];
     const r = { server: t.server_name, package: t.package, scope: t.scope, checks: [] };
@@ -514,30 +511,14 @@ export function doctor(ctx, { env = process.env } = {}) {
       r.checks.push({ check: `env ${e.name}`, ok: set || !e.required, detail: set ? "set" : e.required ? "not set (required)" : "not set" });
       if (!set && e.required) problems.push(`${e.name} not set`);
     }
-    // A role is bound before its credential file exists (some tools pass credentials
-    // through), so this is where a missing file shows up before a call fails on it.
-    if (t.credential_file) {
-      const target = { service: t.server_name, contract: t.contract || null };
-      for (const role of installedRoles) {
-        const bound = bindings.get(role);
-        if (bound && !Object.hasOwn(bound, t.server_name)) continue; // its definition binds no tool of this server
-        const file = bound ? bound[t.server_name] : credentialPath(ctx.config.credentialsDir, role, t.server_name);
-        const found = evaluateExisting(file, role, target);
-        const ok = found.state === "valid";
-        let detail = file;
-        if (found.state === "absent") {
-          detail = `${file} missing: ${t.server_name} calls as ${role} fail until it exists with ${requiredFieldsText(target)}${legacyHint(ctx, role, t.server_name, file)}`;
-        } else if (found.state === "empty") {
-          detail = `${file} is empty: it needs ${requiredFieldsText(target)}`;
-        } else if (!ok) {
-          detail = `${file} is ${found.state}: ${found.reason}`;
-        }
-        r.checks.push({ check: `credential file ${role}`, ok, detail });
-        if (!ok) problems.push(`${role} credential file ${found.state === "absent" ? "missing" : found.state}`);
-      }
+    if (isKeyedToolRecord(t)) {
+      r.checks.push({ check: "key", ok: false, detail: keyedToolAdvice(ctx, t) });
+      problems.push("takes a per-role credential");
     }
     r.ok = problems.length === 0;
     results.push(r);
   }
-  return { harness: ctx.harness, ok: results.every((r) => r.ok), tools: results };
+  const leftovers = legacyCredentialLeftovers(ctx.config.legacyCredentialsDir)
+    .map((path) => ({ path, detail: LEFTOVER_ADVICE }));
+  return { harness: ctx.harness, ok: results.every((r) => r.ok) && leftovers.length === 0, tools: results, leftovers };
 }

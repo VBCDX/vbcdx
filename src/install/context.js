@@ -4,8 +4,8 @@
 // it, `vbcdx` uses the places the harness itself reads: the harness's own
 // configuration variable when set (CLAUDE_CONFIG_DIR, CODEX_HOME,
 // OPENCODE_CONFIG_DIR, HERMES_HOME), otherwise its documented default
-// under the home directory, and keeps its own state (the install manifest and
-// credential files) under ~/.vbcdx. Either way the result goes through the same
+// under the home directory, and keeps its own state (the install manifest)
+// under ~/.vbcdx. Either way the result goes through the same
 // loadConfig validation as `init`, so every path is absolute and checked.
 //
 // The documented default is used only when it is there: an install that would write
@@ -17,16 +17,9 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { parseEnvFile } from "../config/env-parser.js";
-import { loadConfig } from "../config/config.js";
+import { HARNESS_ROOT_KEY, loadConfig } from "../config/config.js";
 import { findWorktreeRoot } from "../planner.js";
 import { configError } from "../errors.js";
-
-const HARNESS_ROOT_KEY = {
-  claude: "VBCDX_AGENTS_CLAUDE_CONFIG_DIR",
-  codex: "VBCDX_AGENTS_CODEX_HOME",
-  opencode: "VBCDX_AGENTS_OPENCODE_CONFIG_DIR",
-  hermes: "VBCDX_AGENTS_HERMES_HOME",
-};
 
 // The harness's own variable and its documented default root.
 //   claude:   CLAUDE_CONFIG_DIR, ~/.claude          (code.claude.com/docs/en/settings)
@@ -74,7 +67,6 @@ export function resolveContext({ harness, scope, envPath, cwd = process.cwd(), h
     }
     entries = new Map([
       ["VBCDX_AGENTS_BASE_DIR", join(home, ".vbcdx")],
-      ["VBCDX_AGENTS_CREDENTIALS_DIR", join(home, ".vbcdx", "credentials")],
       [rootKey, root],
     ]);
   }

@@ -11,6 +11,7 @@ import { spawnSync } from "node:child_process";
 import { createServer } from "node:net";
 import { chmodSync, chownSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { keypair, signFile } from "./helpers/minisign-signer.js";
 import { tempDir } from "./helpers/temp-dir.js";
 import { fakeAccounts } from "./helpers/fake-accounts.js";
@@ -238,6 +239,54 @@ for (const [name, breakIt, code, re, o = {}] of REFUSALS) {
     }
   });
 }
+
+// apply.js 992-995: the EACCES arm needs an euid that is neither root nor in group vbcdx. The case
+// directly above covers it only when the suite is not root (root reads through any mode), so in a
+// root run this one produces it for real: the child imports the module as root, drops the
+// supplementary groups and the effective uid/gid to 65534, gets the refusal from the kernel, and is
+// root again for the coverage report it writes at exit (seteuid/setegid keep uid/gid 0 saved, so
+// that report is still allowed). When the suite is not root it skips loudly, and the coverage job's
+// log then carries the skip token: absent from that log means this arm really ran in that job.
+test("a root run still reaches the EACCES refusal, by dropping to an unprivileged euid", (t) => {
+  if (process.geteuid() !== 0) {
+    t.skip("NEEDS-ROOT: real EACCES via setuid(65534)");
+    return;
+  }
+  t.diagnostic(`geteuid()=${process.geteuid()} in this job: the seteuid arm runs here`);
+  const h = systemInstall();
+  // The temp root is 0700 and the writer creates its parents with the modes `install` asks for;
+  // an unprivileged caller must be able to walk to /etc/vbcdx. Its instance dir stays 0750
+  // root:vbcdx, which is itself the denial for anyone outside the group.
+  chmodSync(h.root, 0o755);
+  chmodSync(at(h, "/etc"), 0o755);
+  chmodSync(at(h, "/etc/vbcdx"), 0o755);
+  const modUrl = pathToFileURL(join(fileURLToPath(new URL(".", import.meta.url)), "..", "src", "service", "apply.js")).href;
+  const script = [
+    `const apply = await import(process.argv[1]);`,
+    // A caller that is neither root nor in group vbcdx: clear the supplementary groups, then drop
+    // the effective ids (the saved ones stay 0, so the report written at exit is still allowed).
+    "process.setgroups([]);",
+    "process.setegid(65534);",
+    "process.seteuid(65534);",
+    `const sys = { path: (p) => process.argv[2] + p, rootUid: 0 };`,
+    "try {",
+    `  apply.systemSidecar(sys, "default");`,
+    '  process.stdout.write(JSON.stringify({ ran: true }) + "\\n");',
+    "} catch (e) {",
+    '  process.stdout.write(JSON.stringify({ code: e.code, message: e.message }) + "\\n");',
+    "}",
+    "process.seteuid(0);",
+    "process.setegid(0);",
+    "",
+  ].join("\n");
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", script, modUrl, h.root], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout), {
+    code: EXIT.CONFIG,
+    message: `${PUB} isn't readable by you: a system sidecar serves root and members of group vbcdx. `
+      + "Ask root to add you (usermod -aG vbcdx <user>), then log in again.",
+  });
+});
 
 test("an --instance that isn't an instance name is refused before any path is built from it", () => {
   const h = systemInstall();

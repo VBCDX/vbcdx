@@ -3,7 +3,8 @@
 //
 // Environment:
 //   PORT             listen port (default 8080)
-//   HOST             bind address (default 0.0.0.0)
+//   HOST             bind address (default 127.0.0.1, this host only; the container
+//                    image sets 0.0.0.0, since its port is what gets published)
 //   PUBLIC_BASE_URL  the public origin the cards advertise, e.g.
 //                    https://agents.example. Set this on the deployment so the
 //                    advertised absolute HTTPS card URLs are correct; when unset
@@ -33,7 +34,7 @@ if (!catalog.packs.length) {
 setActiveCatalog(catalog);
 
 const port = Number(process.env.PORT || 8080);
-const host = process.env.HOST || "0.0.0.0";
+const host = process.env.HOST || "127.0.0.1";
 const configuredBaseUrl = process.env.PUBLIC_BASE_URL || undefined;
 
 const server = createServer({ configuredBaseUrl });

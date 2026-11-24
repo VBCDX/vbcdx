@@ -206,12 +206,12 @@ export function readConfig(absPath, format) {
     text = readFileSync(absPath, "utf8");
   } catch (err) {
     if (err && err.code === "ENOENT") return { exists: false, text: null, doc: {} };
-    return { exists: true, text: null, doc: null, why: `cannot be read (${err && err.code ? err.code : err})` };
+    return { exists: true, text: null, doc: null, why: `cannot be read (${err.code})` };
   }
   try {
     return { exists: true, text, doc: FORMATS[format].parse(text) };
   } catch (err) {
-    return { exists: true, text, doc: null, why: `cannot be read as ${format}: ${err && err.message ? err.message : err}` };
+    return { exists: true, text, doc: null, why: `cannot be read as ${format}: ${err.message}` };
   }
 }
 

@@ -5,21 +5,15 @@
 // reflects the earliest failure.
 
 import { join, dirname, relative, isAbsolute, sep } from "node:path";
-import { existsSync, statSync } from "node:fs";
-import { readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { getRole, roleIds } from "./roles/index.js";
 import { loadConfig } from "./config/config.js";
-import { loadIntegrations, FORGEJO_CONTRACT, isCleartextOffHost } from "./config/integrations.js";
-import {
-  collectCredentialTriples, classifyTriple, credentialPath, credentialConfigKey, describeFields, missingCredentialFields,
-} from "./credentials/writer.js";
+import { loadIntegrations } from "./config/integrations.js";
+import { legacyCredentialLeftovers, leftoverWarning } from "./install/legacy-credentials.js";
 import { renderFlat, renderHermes, resolveHarnessDir, resolveHermesProfileDir } from "./renderers/index.js";
-import { boundServiceTools } from "./renderers/native.js";
 import { sha256 } from "./fs/safe-writer.js";
-import { parseEnvText } from "./config/env-parser.js";
-import { configError, credentialError, conflictError, filesystemError } from "./errors.js";
+import { configError } from "./errors.js";
 import { shownWord } from "./shown.js";
-import { isKnownRole } from "./roles/index.js";
 
 /** Find the top level of the containing Git worktree, or null. */
 export function findWorktreeRoot(startDir) {
@@ -32,35 +26,6 @@ export function findWorktreeRoot(startDir) {
   }
 }
 
-// Contract-specific required fields for an externally provisioned credential
-// file (spec 6.1): the Forgejo contract needs USER + TOKEN/PASSWORD; any other
-// contract (Coolify's included) needs TOKEN.
-function externalCredentialOk(absPath, role, contract) {
-  const has = (v) => typeof v === "string" && v.trim() !== "";
-  let raw;
-  try {
-    raw = readFileSync(absPath, "utf8");
-  } catch (err) {
-    if (err && err.code === "ENOENT") return { ok: false, exit: 3, reason: "credential_missing" };
-    return { ok: false, exit: 4, reason: "credential_unreadable" };
-  }
-  let parsed;
-  try {
-    parsed = parseEnvText(raw, absPath);
-  } catch {
-    return { ok: false, exit: 3, reason: "credential_malformed" };
-  }
-  if (parsed.get("VBCDX_AGENTS_ROLE") !== role) return { ok: false, exit: 3, reason: "role_mismatch" };
-  if (contract === FORGEJO_CONTRACT) {
-    if (!has(parsed.get("VBCDX_AGENTS_USER")) || !(has(parsed.get("VBCDX_AGENTS_TOKEN")) || has(parsed.get("VBCDX_AGENTS_PASSWORD")))) {
-      return { ok: false, exit: 3, reason: "credential_key_missing" };
-    }
-  } else if (!has(parsed.get("VBCDX_AGENTS_TOKEN"))) {
-    return { ok: false, exit: 3, reason: "credential_key_missing" };
-  }
-  return { ok: true };
-}
-
 /**
  * Build the installation plan.
  * @param {object} args parsed init options (from parseInitArgs)
@@ -70,12 +35,9 @@ function externalCredentialOk(absPath, role, contract) {
 /**
  * @param {object} [io.integrations] bindings for the tools `vbcdx install tool` recorded
  *  , used when no integrations file is configured; the file always wins
- * @param {object} [io.launches] server -> { contract, stdio } for the tools `vbcdx install tool`
- *   recorded: an integrations-file stdio service of the same name and contract starts the
- *   way its installed vbcdx.json declares
  */
-export function buildPlan(args, entries, { cwd = process.cwd(), integrations: installedTools = null, launches = null } = {}) {
-  const { harness, scope, force, dryRun, agentsExplicit } = args;
+export function buildPlan(args, entries, { cwd = process.cwd(), integrations: installedTools = null } = {}) {
+  const { harness, scope, force, dryRun } = args;
   // No --agents selects every role of the loaded packs.
   const agents = args.agents || roleIds();
 
@@ -89,7 +51,6 @@ export function buildPlan(args, entries, { cwd = process.cwd(), integrations: in
     }
     return r;
   });
-  const selectedSet = new Set(agents);
 
   let worktreeRoot = null;
   if (scope === "project") {
@@ -101,107 +62,20 @@ export function buildPlan(args, entries, { cwd = process.cwd(), integrations: in
   let integrations = null;
   if (config.integrationsFile) {
     integrations = loadIntegrations(config.integrationsFile);
-    for (const [name, svc] of Object.entries(integrations.services)) {
-      const installed = launches && Object.hasOwn(launches, name) ? launches[name] : null;
-      if (svc.transport === "stdio" && !svc.stdio && installed && installed.contract === svc.contract) svc.stdio = installed.stdio;
-    }
   } else if (installedTools) {
     integrations = installedTools;
   }
 
-  // Phase: credentials (exit 3). Collect triples and decide per-file ops: one per
-  // role-wide triple, one per role-and-service triple.
-  const triples = collectCredentialTriples(entries);
-  const credentialOps = [];
+  // Nothing here writes or reads a credential: the configuration file's per-role credential
+  // keys and the integrations file's credential fields were refused above (loadConfig,
+  // loadIntegrations), before any write. Files an earlier version wrote are only listed, by
+  // path, so the operator is told they are still on disk.
   const warnings = [];
-  const plannedCredPaths = new Map(); // role -> Set of planned paths (write or retain)
-  const planPath = (role, path) => {
-    if (!plannedCredPaths.has(role)) plannedCredPaths.set(role, new Set());
-    plannedCredPaths.get(role).add(path);
-  };
+  const leftovers = legacyCredentialLeftovers(config.legacyCredentialsDir);
+  if (leftovers.length) warnings.push(leftoverWarning(leftovers));
 
-  for (const triple of triples.values()) {
-    const { role, service } = triple;
-    const known = isKnownRole(role);
-    const bound = service && integrations ? integrations.services[service] : undefined;
-    const target = { service, contract: bound ? bound.contract || null : null };
-    const cls = classifyTriple(triple, target);
-    const isSelected = selectedSet.has(role);
-    const path = credentialPath(config.credentialsDir, role, service);
-    const what = service ? `${role} on ${service}` : role;
-    const incomplete = () => {
-      const keys = describeFields(missingCredentialFields(triple, target), (f) => credentialConfigKey(f, role, service));
-      return `set ${keys} for ${path}, or leave all three blank to disable.`;
-    };
-    const unbound = () => {
-      if (!service) return;
-      if (!bound) warnings.push(`Credential file ${path} will be written, but no bound service is named ${service}; nothing reads it until one is.`);
-      else if ((bound.transport || "stdio") === "http" || bound.credentialFree) {
-        warnings.push(`Credential file ${path} will be written, but ${service} takes no credential file (its identity travels with each call); nothing reads it.`);
-      }
-    };
-
-    if (known && isSelected) {
-      if (cls === "incomplete") {
-        throw credentialError(`Credential triple for ${what} is incomplete: ${incomplete()}`);
-      }
-      if (cls === "complete") {
-        credentialOps.push({ role, service, contract: target.contract, path, triple: { ...triple, role } });
-        planPath(role, path);
-        unbound();
-      }
-      // disabled -> no file
-      continue;
-    }
-    if (known && !isSelected) continue; // unselected known role: excluded
-
-    // Unknown role.
-    if (agentsExplicit) continue; // explicit selection excludes unknown triples
-    if (cls === "disabled") continue;
-    if (cls === "incomplete") {
-      throw credentialError(`Credential triple for unknown role ${what} is incomplete (possible typo of a canonical agent ID); fix it or remove it: ${incomplete()}`);
-    }
-    // complete unknown triple under default-all: write with a warning.
-    credentialOps.push({ role, service, contract: target.contract, path, triple: { ...triple, role }, unknown: true });
-    planPath(role, path);
-    warnings.push(`Credential file for unknown role ${role} will be written, but no corresponding agent is installed.`);
-  }
-
-  // An http service gets every bound role's bearer token on each call.
-  if (integrations) {
-    for (const [service, svc] of Object.entries(integrations.services)) {
-      if (svc.transport !== "http" || !svc.url) continue;
-      if (isCleartextOffHost(svc.url)) { // only reachable with "allow_cleartext": true
-        warnings.push(`Integration ${service} sends each role's bearer token in cleartext to ${new URL(svc.url).host} (allow_cleartext); use https unless that host is on a trusted private network.`);
-      }
-    }
-  }
-
-  // Cross-check integration credential mappings for selected roles. Installed-tool
-  // bindings name the role's default credential file, which may not exist yet; the
-  // caller warns about it instead.
-  if (integrations && config.integrationsFile) {
-    for (const [service, svc] of Object.entries(integrations.services)) {
-      for (const [role, credPath] of Object.entries(svc.credentials)) {
-        if (!selectedSet.has(role)) continue; // completeness only for the selection
-        if (plannedCredPaths.get(role)?.has(credPath)) continue; // this installer plans to create it
-        // Otherwise it must be an existing, valid, separately provisioned file.
-        const check = externalCredentialOk(credPath, role, svc.contract);
-        if (!check.ok) {
-          const msg = `Integration ${service} maps ${role} to ${credPath}, which is ${check.reason}. It must be a valid, separately provisioned credential file.`;
-          if (check.exit === 4) throw filesystemError(msg);
-          throw credentialError(msg);
-        }
-      }
-    }
-  }
-
-  // Phase: generated definitions (rendered content + destinations). Each records the
-  // credential file its role was told to pass to each tool, so doctor
-  // checks exactly the role/tool pairs the definitions bind, without the packs loaded.
+  // Phase: generated definitions (rendered content + destinations).
   const generated = [];
-  const credentialsOf = (role) => Object.fromEntries(boundServiceTools(role.descriptor, integrations)
-    .filter((b) => b.credentialFile).map((b) => [b.server, b.credentialFile]));
   if (harness === "hermes") {
     if (!config.hermes) {
       warnings.push("No Hermes model routing configured (VBCDX_AGENTS_HERMES_BASE_URL/_MODEL): profiles are written without a model section and will not run until one is configured.");
@@ -213,7 +87,7 @@ export function buildPlan(args, entries, { cwd = process.cwd(), integrations: in
     for (const role of roles) {
       const dir = resolveHermesProfileDir(config.harnessRoot, role.id);
       for (const f of renderHermes(role, { integrations, hermes: config.hermes, webSearch: config.hermesWebSearch }).files) {
-        generated.push({ role: role.id, harness, destination: join(dir, f.name), content: f.content, digest: sha256(Buffer.from(f.content)), mode: f.mode, merge: f.merge, credentials: credentialsOf(role), overlays: role.overlays || [], renamedFrom: role.renamedFrom || null });
+        generated.push({ role: role.id, harness, destination: join(dir, f.name), content: f.content, digest: sha256(Buffer.from(f.content)), mode: f.mode, merge: f.merge, overlays: role.overlays || [], renamedFrom: role.renamedFrom || null });
       }
     }
   } else {
@@ -221,18 +95,16 @@ export function buildPlan(args, entries, { cwd = process.cwd(), integrations: in
     for (const role of roles) {
       const out = renderFlat(harness, role, { integrations });
       const destination = join(dir, out.filename);
-      generated.push({ role: role.id, harness, destination, content: out.content, digest: sha256(Buffer.from(out.content)), mode: out.mode, credentials: credentialsOf(role), overlays: role.overlays || [], renamedFrom: role.renamedFrom || null });
+      generated.push({ role: role.id, harness, destination, content: out.content, digest: sha256(Buffer.from(out.content)), mode: out.mode, overlays: role.overlays || [], renamedFrom: role.renamedFrom || null });
     }
   }
 
   return {
     harness, scope, force, dryRun,
     baseDir: config.baseDir,
-    credentialsDir: config.credentialsDir,
     manifestPath: join(config.baseDir, "manifests", "installation.json"),
     roles: agents,
     generated,
-    credentialOps,
     launchEnv: config.launchEnv,
     integrations: integrations ? Object.keys(integrations.services) : [],
     warnings,
@@ -269,8 +141,9 @@ function isUnder(absPath, root) {
 
 /**
  * Removal candidates: the manifest entries this run is responsible for whose
- * path the current render no longer produces — a role taken out of `git_roles`, a
- * `git_url` removed, or any other file a render stops emitting. Pure and read-only:
+ * path the current render no longer produces — a role's web-search plugin once web
+ * search is no longer configured, a file an earlier version rendered and this one does
+ * not, or any other file a render stops emitting. Pure and read-only:
  * the executor decides what to do with each one.
  *
  * A candidate must pass every one of these, so a removal can never reach another

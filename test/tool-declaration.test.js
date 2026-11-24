@@ -127,7 +127,7 @@ test("env entries: name, uniqueness, kind and required", () => {
   assert.match(errorsOf(dup), /listed twice/);
   const kind = decl();
   kind.env[0].kind = "secret";
-  assert.match(errorsOf(kind), /kind must be one of credential, config/);
+  assert.match(errorsOf(kind), /kind must be one of config\./);
   const req = decl();
   req.env[0].required = "yes";
   assert.match(errorsOf(req), /required must be true or false/);
@@ -166,9 +166,12 @@ test("http: path shape and port_env must be a declared env var", () => {
   assert.match(errorsOf(missing), /http: missing required field path/);
 });
 
-test("credential_file.argument is a tool argument name", () => {
-  assert.match(errorsOf({ ...decl(), credential_file: { argument: "Credential-File" } }), /credential_file.argument/);
-  assert.match(errorsOf({ ...decl(), credential_file: "credential_file" }), /credential_file must be an object/);
+test("credential_file is refused whatever it holds: the tool needs a key, which goes in Keyhole", () => {
+  for (const value of [{ argument: "credential_file" }, { argument: "Credential-File" }, "credential_file"]) {
+    const errs = errorsOf({ ...decl(), credential_file: value });
+    assert.match(errs, /credential_file is no longer supported: this tool needs a key; register it as a Keyhole tool/);
+    assert.doesNotMatch(errs, /unknown field|credential_file\.argument|must be an object/, "one reason, said once");
+  }
 });
 
 test("validation reports every problem, not just the first", () => {
@@ -216,7 +219,7 @@ test("readToolDeclaration reads, cross-checks and refuses duplicate keys", () =>
 // A 39-character token, built at run time so the literal never sits in the source.
 const TOKEN = "ghp" + "_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
 
-test("no args list can carry a key, token or host, at any length (review findings 1)", () => {
+test("no args list can carry a key, token or host, at any length", () => {
   // Each was once accepted by the 31-character cap alone.
   const values = [TOKEN, "AKIAIOSFODNN7EXAMPLE", "--" + "a".repeat(29) + "1", "deadbeef1234", "git.example.com", "10.0.0.1", "s3cr3t"];
   for (const field of ["stdio", "http", "manifest"]) {
@@ -322,7 +325,7 @@ test("size limits are enforced: env items and http.path length (finding 2)", () 
 });
 
 // A minimal evaluator for the JSON Schema keywords the shipped schema uses, so the
-// schema's own claims are executed rather than read (review finding 2).
+// schema's own claims are executed rather than read.
 function schemaErrors(node, value, root = schema) {
   if (node.$ref) return schemaErrors(root.$defs[node.$ref.split("/").pop()], value, root);
   const errs = [];
@@ -386,8 +389,8 @@ test("the six cross-field rules are validator-only, as the schema states", () =>
     ["duplicate env names", (d) => { d.env[1].name = d.env[0].name; }, null],
     ["bin not in package.json", (d) => { d.stdio.bin = "other-bin"; }, PKG],
     ["subcommand after a flag", (d) => { d.stdio.args = ["--verbose", "mcp"]; }, null],
-    ["port_env not read in http mode", (d) => { d.env[3].modes = ["stdio"]; }, null],
-    ["an http-mode variable without an http mode", (d) => { delete d.http; d.env[3].modes = ["http"]; }, null],
+    ["port_env not read in http mode", (d) => { d.env[2].modes = ["stdio"]; }, null],
+    ["an http-mode variable without an http mode", (d) => { delete d.http; d.env[2].modes = ["http"]; }, null],
   ];
   assert.match(schema.description, /checked only by the reference validator/);
   for (const [label, mutate, pkg] of cases) {
@@ -409,13 +412,13 @@ test("env modes: stdio, http or both; absent means both", () => {
   const errs = (mutate) => { const d = decl(); mutate(d); return errorsOf(d); };
   assert.match(errs((d) => { d.env[1].modes = ["stdio", "http", "stdio"]; }), /env\[1\]\.modes must list stdio and\/or http, each at most once/);
   assert.match(errs((d) => { d.env[1].modes = [1]; }), /env\[1\]\.modes must list/);
-  assert.match(errs((d) => { d.env[3].modes = ["stdio"]; }), /http\.port_env EXAMPLE_TRACKER_HTTP_PORT is read in http mode, so its modes must include http/);
+  assert.match(errs((d) => { d.env[2].modes = ["stdio"]; }), /http\.port_env EXAMPLE_TRACKER_HTTP_PORT is read in http mode, so its modes must include http/);
   assert.match(errs((d) => { delete d.http; d.env[1].modes = ["http"]; }), /env\[1\]\.modes lists http, but the declaration has no http mode/);
   assert.match(errs((d) => { delete d.http; d.env[1].modes = ["stdio", "http"]; }), /env\[1\]\.modes lists http, but the declaration has no http mode/);
   const noHttp = decl();
   delete noHttp.http;
   noHttp.env[1].modes = ["stdio"];
-  delete noHttp.env[3].modes; // the fixture reads its port in http mode only
+  delete noHttp.env[2].modes; // the fixture reads its port in http mode only
   assert.equal(validateToolDeclaration(noHttp).ok, true, "stdio alone needs no http mode");
 });
 
@@ -424,4 +427,44 @@ test("envForMode keeps the items a mode reads", () => {
   assert.deepEqual(envForMode(env, "stdio").map((e) => e.name), ["A", "B", "D"]);
   assert.deepEqual(envForMode(env, "http").map((e) => e.name), ["A", "C", "D"]);
   assert.deepEqual(envForMode(undefined, "stdio"), []);
+});
+
+test("stdio and http must be objects, not strings or numbers", () => {
+  // src/install/tool-declaration.js:101
+  const stdio = decl();
+  stdio.stdio = "node";
+  assert.equal(errorsOf(stdio), "stdio must be an object.");
+
+  const http = decl();
+  http.http = 5;
+  assert.equal(errorsOf(http), "http must be an object.");
+});
+
+test("a string bin field with no package name, or a package with no bin, has no entry to match", () => {
+  // src/install/tool-declaration.js:143
+  const noName = decl();
+  noName.stdio.bin = "srv";
+  assert.match(errorsOf(noName, { pkg: { bin: "./server.js" } }), /^stdio\.bin "srv" is not a bin entry of the package's package\.json\.$/m);
+
+  const noBin = decl();
+  noBin.stdio.bin = "srv";
+  assert.match(errorsOf(noBin, { pkg: { name: "@example/tool" } }), /^stdio\.bin "srv" is not a bin entry of the package's package\.json\.$/m);
+});
+
+test("an env item that is not an object is refused, and its name is then not declared", () => {
+  // src/install/tool-declaration.js:161
+  const d = decl();
+  d.env = ["EXAMPLE_TRACKER_URL"];
+  const errs = errorsOf(d);
+  assert.match(errs, /^env\[0\] must be an object\.$/m);
+  assert.match(errs, /^http\.port_env EXAMPLE_TRACKER_HTTP_PORT must also be listed in env\.$/m);
+});
+
+test("http.port_env must be an upper-case environment variable name", () => {
+  // src/install/tool-declaration.js:212
+  for (const bad of ["port", 5]) {
+    const d = decl();
+    d.http.port_env = bad;
+    assert.equal(errorsOf(d), "http.port_env must be an upper-case environment variable name.", String(bad));
+  }
 });

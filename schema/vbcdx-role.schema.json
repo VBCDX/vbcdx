@@ -2,13 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "vbcdx-role.schema.json",
   "title": "VBCDX role descriptor (role.json)",
-  "description": "One per role, at <roles_dir>/<id>/role.json in an agent pack (vbcdx-pack.schema.json), next to the role's prompt.md. Every renderer reads the role from this descriptor and that prompt, so a role means the same thing in every harness. It states the role's policy and local capabilities in abstract terms; the installer maps them to each harness's native controls. Every per-field rule is in this schema. Two rules span fields or files and are checked only by the reference loader (src/packs/load.js): id equals the role's directory name, and credential_suffix is the id upper-cased with hyphens as underscores.",
+  "description": "One per role, at <roles_dir>/<id>/role.json in an agent pack (vbcdx-pack.schema.json), next to the role's prompt.md. Every renderer reads the role from this descriptor and that prompt, so a role means the same thing in every harness. It states the role's policy and local capabilities in abstract terms; the installer maps them to each harness's native controls. Every per-field rule is in this schema. One rule spans files and is checked only by the reference loader (src/packs/load.js): id equals the role's directory name.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema_version",
     "id",
-    "credential_suffix",
     "name",
     "description",
     "policy",
@@ -29,9 +28,7 @@
       "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
     },
     "credential_suffix": {
-      "description": "The id upper-cased with hyphens as underscores; names the role's credential keys (VBCDX_AGENTS_TOKEN_<SUFFIX>).",
-      "type": "string",
-      "pattern": "^[A-Z0-9]+(_[A-Z0-9]+)*$"
+      "description": "Deprecated and ignored. Earlier versions required it (the id upper-cased with hyphens as underscores) and named per-role credential keys after it. A pack may still carry it, with any value; nothing reads it."
     },
     "name": {
       "description": "Display name.",

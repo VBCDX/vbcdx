@@ -4,13 +4,14 @@
 // failure raises an InstallerError carrying one of these codes, and the CLI
 // entrypoint maps the raised code to the process exit status. Deterministic
 // first-failed-phase precedence is enforced by validating in phase order:
-// CLI/config (2) -> credentials (3) -> filesystem safety (4) ->
+// CLI/config (2) -> filesystem safety (4) ->
 // generated-content/scope/dependency (5) -> native subprocess (6).
 //
 //   0  requested writes / staging completed
 //   2  CLI or configuration syntax, unsupported values, invalid paths,
 //      or invalid role selection
-//   3  credential validation
+//   3  not raised by this version. Earlier versions used it for credential-file
+//      validation; the number stays reserved so the other codes keep their meaning.
 //   4  filesystem safety, permissions, ownership, lock, or write failure
 //   5  generated-content conflict, unsupported native scope, or known
 //      dependency / harness incompatibility
@@ -42,7 +43,6 @@ export class InstallerError extends Error {
 }
 
 export const configError = (m, d) => new InstallerError(EXIT.CONFIG, m, d);
-export const credentialError = (m, d) => new InstallerError(EXIT.CREDENTIAL, m, d);
 export const filesystemError = (m, d) => new InstallerError(EXIT.FILESYSTEM, m, d);
 export const conflictError = (m, d) => new InstallerError(EXIT.CONFLICT, m, d);
 export const subprocessError = (m, d) => new InstallerError(EXIT.SUBPROCESS, m, d);

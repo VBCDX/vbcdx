@@ -44,8 +44,11 @@ COPY packs ./node_modules
 # Run as the image's built-in non-root user. The server only reads files.
 USER node
 
-# Documented default port. Override PORT / PUBLIC_BASE_URL at runtime.
+# Documented default port. Override PORT / PUBLIC_BASE_URL at runtime. The server itself binds
+# 127.0.0.1 by default; in the container it listens on every interface, so the published port
+# reaches it.
 ENV PORT=8080
+ENV HOST=0.0.0.0
 EXPOSE 8080
 
 # Liveness against the server's own health route (Node 22 has global fetch).

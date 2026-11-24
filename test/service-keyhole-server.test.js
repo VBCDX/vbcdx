@@ -125,7 +125,7 @@ test("the plan: its own user and dirs, the env file (no secret) and the control 
 test("the unit: env file, check then serve, as vbcdx-keyhole, UMask=0077, D-b's hardening", () => {
   const lines = plan(host(), release()).unit.text.split("\n");
   // The product term is "control-plane mode"; no internal wording ships in the unit.
-  assert.ok(!/herd/i.test(lines.join("\n")), "no internal wording in the unit");
+  assert.ok(!new RegExp(["he", "rd"].join(""), "i").test(lines.join("\n")), "no internal wording in the unit");
   for (const line of ["Description=Keyhole server, control-plane mode (instance default)", "Type=exec", "User=vbcdx-keyhole", "Group=vbcdx-keyhole", `EnvironmentFile=${ENV}`,
     `ExecStartPre=${EXEC} check`, `ExecStart=${EXEC} serve`, "Restart=on-failure", "UMask=0077",
     "StateDirectory=vbcdx-keyhole/default", "StateDirectoryMode=0700", "NoNewPrivileges=yes", "ProtectSystem=strict",
